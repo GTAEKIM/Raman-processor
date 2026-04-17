@@ -1,0 +1,60 @@
+{
+    "defaults": {
+        "lower_bound": 400.0,
+        "upper_bound": 3300.0,
+        "sg_poly_order": 1,
+        "sg_frame_window": 15,
+        "cosmic_ray_threshold": 5.0,
+        "normalization": "none",
+        "baseline": {
+            "algorithm": "airpls",
+            "params": {
+                "lam": 1000000.0,
+                "diff_order": 2,
+                "p": 0.01
+            }
+        },
+        "batch": {
+            "parallel": true,
+            "n_jobs": -1
+        },
+        "nmf": {
+            "init": "nndsvda",
+            "n_components": 3,
+            "random_state": 0
+        }
+    },
+    "validation": {
+        "sg_poly_order_min": 1,
+        "sg_frame_window_min": 3,
+        "baseline_order_min": 0,
+        "baseline_order_max": 20,
+        "nmf_components_min": 2,
+        "pca_n_components": 10
+    },
+    "baseline_algorithms": {
+        "airpls": "airPLS (Adaptive Iter. Reweighted PLS)",
+        "arpls": "arPLS (Asymmetrically Reweighted PLS)",
+        "asls": "ALS (Asymmetric Least Squares)",
+        "snip": "SNIP (Iterative Peak-Clipping)",
+        "atq": "Asymmetric Truncated Quadratic",
+        "stq": "Symmetric Truncated Quadratic",
+        "ah": "Asymmetric Huber",
+        "sh": "Symmetric Huber",
+        "mor": "BubbleFill-like (Morphological)"
+    },
+    "normalization_methods": {
+        "none": "None",
+        "snv": "SNV (Standard Normal Variate)",
+        "vector": "Vector (L2 Norm = 1)",
+        "area": "Area (Unit Integral)",
+        "minmax": "Min-Max [0, 1]",
+        "maxpeak": "Max Peak (max = 1)"
+    },
+    "nmf_init_methods": {
+        "nndsvda": "NNDSVDA (recommended)",
+        "nndsvd": "NNDSVD",
+        "nndsvdar": "NNDSVDAR (stochastic)",
+        "random": "Random"
+    }
+}
