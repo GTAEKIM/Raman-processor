@@ -395,15 +395,19 @@ class RamanProcessorApp:
 
     # ── Plot ────────────────────────────────────────────────────────────
 
-    def _setup_plot(self, title: str):
+    def _setup_plot(self, title: str, normalized: bool = False):
         self.ax.clear()
         self.ax.set_title(title)
         self.ax.set_xlabel("Raman shift (cm\u207b\u00b9)")
-        self.ax.set_ylabel("Intensity (AU)")
+        if normalized:
+            self.ax.set_ylabel("Normalized Intensity")
+        else:
+            self.ax.set_ylabel("Intensity (AU)")
         self.ax.grid(True)
 
     def _update_display(self):
-        self._setup_plot("Raman Spectrum")
+        is_normalized = self.last_processing_stage == ProcessingStage.NORMALIZED
+        self._setup_plot("Raman Spectrum", normalized=is_normalized)
 
         if self.current_selection_idx is None or self.processor.y_raw is None:
             self.ax.set_visible(False)
@@ -428,14 +432,24 @@ class RamanProcessorApp:
             self.ax.plot(x, self.baseline, label="Baseline", color='magenta', linestyle='--')
             plotted = True
         if self.show_final.get() and self.y_final is not None:
-            label = "Final"
-            if self.normalization_code.get() != 'none':
-                label = f"Final ({self.normalization_code.get().upper()})"
+            norm_code = self.normalization_code.get()
+            label = f"Final ({norm_code.upper()})" if norm_code != 'none' else "Final"
             self.ax.plot(x, self.y_final, label=label, color='red')
             plotted = True
 
         if plotted:
             self.ax.legend()
+
+        # If normalized Final is shown together with non-normalized traces,
+        # show a text warning about the scale mismatch
+        if is_normalized and (self.show_raw.get() or self.show_smooth.get()):
+            self.ax.text(
+                0.01, 0.99,
+                "⚠ Scale mismatch: Final is normalized, Raw/Smooth are not",
+                transform=self.ax.transAxes,
+                fontsize=8, color='darkorange', va='top',
+            )
+
         self.fig.tight_layout()
         self.canvas.draw()
 
@@ -605,19 +619,37 @@ class RamanProcessorApp:
             return
         method = self.normalization_code.get()
         if method == 'none':
-            # Re-derive y_final from y_mid - baseline to undo any prior normalization
+            # Restore display toggles and re-derive y_final
+            self.show_raw.set(True)
+            self.show_smooth.set(True)
+            self.show_baseline.set(True)
             if self.baseline is not None and self.y_mid is not None:
                 self.y_final = self.y_mid - self.baseline
                 self.last_processing_stage = ProcessingStage.BASELINE_CORRECTED
             self._update_display()
-            self._update_status("Normalization cleared.")
+            self._update_status("Normalization cleared — display restored.")
             return
+
         # Always re-compute from (y_mid - baseline) to avoid compounding
-        base = self.y_mid - self.baseline if (self.y_mid is not None and self.baseline is not None) else self.y_final
+        base = (
+            self.y_mid - self.baseline
+            if (self.y_mid is not None and self.baseline is not None)
+            else self.y_final
+        )
         self.y_final = normalize_spectrum(base, method=method)
         self.last_processing_stage = ProcessingStage.NORMALIZED
+
+        # Hide Raw / Smooth / Baseline — their scale is incompatible with [0,1] or unit-norm
+        self.show_raw.set(False)
+        self.show_smooth.set(False)
+        self.show_baseline.set(False)
+        self.show_final.set(True)
+
         self._update_display()
-        self._update_status(f"Normalization applied: {method.upper()}")
+        self._update_status(
+            f"Normalization applied: {method.upper()}  "
+            f"(Raw/Smooth/Baseline hidden — scale mismatch)"
+        )
 
     def _on_norm_change(self, event=None):
         name = self.normalization_name.get()
