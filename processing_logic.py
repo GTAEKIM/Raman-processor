@@ -110,12 +110,18 @@ class DataProcessor:
             raise FileNotFoundError(f"File not found: {filepath}")
 
         ext = os.path.splitext(filepath)[1].lower()
-        if ext == '.csv':
-            df_raw = pd.read_csv(filepath, header=None)
-        elif ext in ('.xlsx', '.xls'):
-            df_raw = pd.read_excel(filepath, header=None)
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
+        try:
+            if ext in ('.csv',):
+                df_raw = pd.read_csv(filepath, header=None)
+            elif ext in ('.xlsx', '.xls'):
+                df_raw = pd.read_excel(filepath, header=None)
+            elif ext in ('.txt', '.asc', '.dat'):
+                df_raw = _load_text_file(filepath)
+            else:
+                raise ValueError(f"Unsupported file format: {ext}")
+        except Exception as e:
+            logging.error(f"Failed to load data from {filepath}: {e}")
+            raise ValueError(f"Could not read file. Error: {e}")
 
         if df_raw.shape[0] < 2 or df_raw.shape[1] < 2:
             raise ValueError("Data must have at least two rows and two columns.")
@@ -544,6 +550,103 @@ class DataProcessor:
             f"NMF performed with {n_components} components (init={init}, iters={model.n_iter_})."
         )
         return results
+
+
+# ── Text / ASCII file loader ──────────────────────────────────────
+
+
+def _load_text_file(filepath: str) -> pd.DataFrame:
+    """Load a plain-text Raman data file and return a DataFrame in the standard format.
+
+    Handles two layout types automatically:
+
+    Type A – Multi-spectrum table (same format as CSV/Excel):
+        Row 0   : [empty/label] | shift_1 | shift_2 | ...
+        Row 1.. : sample_name  | int_1   | int_2   | ...
+
+    Type B – Single-spectrum two-column (wavenumber | intensity), one pair per row:
+        400.0   123.4
+        401.0   125.1
+        ...
+        → Converted to Type-A shape with sample name = filename stem.
+
+    Features:
+    - Auto-detects separator: tab → comma → semicolon → whitespace
+    - Skips comment lines starting with '#' or '%'
+    - Skips blank lines
+    - Tolerates UTF-8 and Latin-1 encodings
+    """
+    # Read raw lines, stripping comments and blanks
+    raw_lines: list[str] = []
+    for encoding in ('utf-8', 'latin-1'):
+        try:
+            with open(filepath, 'r', encoding=encoding) as fh:
+                for line in fh:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith(('#', '%')):
+                        raw_lines.append(stripped)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise ValueError("Could not decode file with UTF-8 or Latin-1 encoding.")
+
+    if not raw_lines:
+        raise ValueError("File contains no data after stripping comment/blank lines.")
+
+    # Detect separator from first non-empty line
+    first = raw_lines[0]
+    if '\t' in first:
+        sep = '\t'
+    elif ',' in first:
+        sep = ','
+    elif ';' in first:
+        sep = ';'
+    else:
+        sep = r'\s+'   # generic whitespace
+
+    # Parse into a list-of-lists (all numeric where possible)
+    import re
+    rows: list[list[str]] = []
+    for line in raw_lines:
+        if sep == r'\s+':
+            parts = re.split(r'\s+', line)
+        else:
+            parts = line.split(sep)
+        rows.append([p.strip() for p in parts])
+
+    # Remove completely empty trailing tokens from each row
+    rows = [[c for c in row if c != ''] for row in rows if any(c != '' for c in row)]
+
+    # Check if all tokens in the first row are numeric → Type B (two-column)
+    def _is_numeric(s: str) -> bool:
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
+
+    first_row_numeric = all(_is_numeric(c) for c in rows[0])
+    all_rows_two_cols = all(len(r) == 2 for r in rows)
+
+    if first_row_numeric and all_rows_two_cols:
+        # Type B: wavenumber | intensity single-spectrum file
+        sample_name = os.path.splitext(os.path.basename(filepath))[0]
+        shifts = [float(r[0]) for r in rows]
+        intensities = [float(r[1]) for r in rows]
+        # Build Type-A DataFrame:
+        #   row0: '' | shift_0 | shift_1 | ...
+        #   row1: sample_name | int_0 | int_1 | ...
+        header_row = [''] + [str(s) for s in shifts]
+        data_row = [sample_name] + [str(v) for v in intensities]
+        df = pd.DataFrame([header_row, data_row])
+        logging.info(f"Detected Type-B (2-column single spectrum): {len(shifts)} points.")
+        return df
+
+    # Type A: multi-spectrum table — parse as-is
+    df = pd.DataFrame(rows)
+    logging.info(f"Detected Type-A (multi-spectrum table): {df.shape[0]} rows x {df.shape[1]} cols.")
+    return df
 
 
 # ── Worker helper for parallel batch (module-level for pickling) ──

@@ -443,7 +443,13 @@ class RamanProcessorApp:
 
     def _import_data(self):
         filepath = filedialog.askopenfilename(
-            filetypes=[("Excel or CSV", "*.xlsx *.xls *.csv"), ("All files", "*.*")]
+            filetypes=[
+                ("All supported", "*.xlsx *.xls *.csv *.txt *.asc *.dat"),
+                ("Excel", "*.xlsx *.xls"),
+                ("CSV", "*.csv"),
+                ("Text / ASCII", "*.txt *.asc *.dat"),
+                ("All files", "*.*"),
+            ]
         )
         if not filepath:
             return

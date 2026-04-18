@@ -105,19 +105,43 @@ python main_app.py
 | openpyxl | Excel file export |
 | joblib | Parallel batch processing |
 
+## Supported File Formats
+
+| Extension | Description |
+|-----------|-------------|
+| `.xlsx` / `.xls` | Excel workbook |
+| `.csv` | Comma-separated values |
+| `.txt` | Tab / comma / semicolon / space-separated text |
+| `.asc` | ASCII export from Renishaw, Horiba, Bruker, etc. |
+| `.dat` | Generic numeric data file |
+
+Comment lines starting with `#` or `%` are skipped automatically.
+
 ## Data Format
 
-Input data should be structured as:
+### Multi-spectrum table (Type A)
+Standard format for multiple samples — same layout as CSV/Excel:
 
-|  | Raman Shift 1 | Raman Shift 2 | ... |
+|  | Shift 1 | Shift 2 | ... |
 |---|---|---|---|
 | Sample 1 | intensity | intensity | ... |
 | Sample 2 | intensity | intensity | ... |
-| ... | ... | ... | ... |
 
 - **Row 1**: Raman shift values (wavenumbers, cm⁻¹)
 - **Column 1**: Sample names
 - **Data cells**: Intensity values
+
+### Two-column single spectrum (Type B)
+Automatically detected when the file contains exactly two numeric columns:
+
+```
+400.0   123.4
+401.0   125.1
+402.0   119.8
+...
+```
+
+The filename stem is used as the sample name.
 
 ## Project Structure
 
