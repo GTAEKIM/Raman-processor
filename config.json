@@ -56,5 +56,26 @@
         "nndsvd": "NNDSVD",
         "nndsvdar": "NNDSVDAR (stochastic)",
         "random": "Random"
+    },
+    "pca_scaling_methods": {
+        "auto": "Auto-scale (unit variance)",
+        "mean": "Mean-center only",
+        "pareto": "Pareto (sqrt std)",
+        "none": "No scaling"
+    },
+    "peak_detection": {
+        "prominence_percent": 2.0,
+        "min_distance": 5,
+        "default_profile": "gaussian"
+    },
+    "qc": {
+        "snr_noise_region": [1800, 2000],
+        "saturation_relative": 0.98
+    },
+    "derivative": {
+        "enabled": false,
+        "order": 1,
+        "window": 15,
+        "polyorder": 3
     }
 }

@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
-from scipy.signal import savgol_filter
-from typing import Tuple, Dict, Any, Callable, Optional
+from scipy.signal import savgol_filter, find_peaks, peak_widths
+from scipy.stats import f as f_dist
+from typing import Tuple, Dict, Any, Callable, Optional, List
 import os
 import logging
 import threading
@@ -12,6 +13,14 @@ from pybaselines.morphological import mor
 from pybaselines.whittaker import airpls, arpls, asls
 from pybaselines.smooth import snip
 from joblib import Parallel, delayed
+
+# lmfit is optional at import time — peak fitting degrades gracefully if absent
+try:
+    from lmfit.models import GaussianModel, LorentzianModel, VoigtModel, PseudoVoigtModel
+    _LMFIT_AVAILABLE = True
+except ImportError:
+    _LMFIT_AVAILABLE = False
+    logging.warning("lmfit not installed — peak fitting disabled.")
 
 
 class ProcessingStage(Enum):
@@ -35,6 +44,310 @@ WHITTAKER_ALGOS = {'airpls', 'arpls', 'asls'}
 
 # Supported normalization methods
 NORMALIZATION_METHODS = {'none', 'snv', 'vector', 'area', 'minmax', 'maxpeak'}
+
+# PCA scaling methods
+PCA_SCALING_METHODS = {'auto', 'mean', 'pareto', 'none'}
+
+# Peak profile models (requires lmfit)
+PEAK_PROFILES = {'gaussian', 'lorentzian', 'voigt', 'pseudovoigt'}
+
+
+# ───────────────────────── Derivative Spectra ─────────────────────────
+
+
+def compute_derivative(
+    y: np.ndarray,
+    order: int = 1,
+    window: int = 15,
+    polyorder: int = 3,
+) -> np.ndarray:
+    """Compute nth-order derivative spectrum using Savitzky-Golay.
+
+    Derivative spectra remove slow-varying baselines naturally and
+    enhance sharp Raman features. Common: 1st-order for baseline removal,
+    2nd-order for peak sharpening / overlapped-peak resolution.
+    """
+    if window % 2 == 0:
+        window += 1
+    window = max(3, min(window, len(y) - 1))
+    if window % 2 == 0:
+        window -= 1
+    polyorder = max(order + 1, min(polyorder, window - 1))
+    return savgol_filter(y, window_length=window, polyorder=polyorder, deriv=order)
+
+
+# ───────────────────────── Quality Control ─────────────────────────
+
+
+def compute_snr(
+    y: np.ndarray,
+    x: np.ndarray,
+    noise_region: Tuple[float, float] = (1800.0, 2000.0),
+) -> float:
+    """Estimate SNR (dB) from signal peak-to-peak vs. std in a silent Raman region.
+
+    Default noise region is the Raman silent region (~1800-2000 cm^-1) which
+    contains no vibrational features for most organic/biological samples.
+    Returns np.inf if noise is zero, NaN if region is empty.
+    """
+    mask = (x >= noise_region[0]) & (x <= noise_region[1])
+    if not np.any(mask):
+        return float('nan')
+    noise_std = float(np.std(y[mask]))
+    signal_pp = float(np.max(y) - np.min(y))
+    if noise_std == 0:
+        return float('inf')
+    return 20.0 * np.log10(signal_pp / noise_std)
+
+
+def detect_saturation(y: np.ndarray, relative_threshold: float = 0.98) -> bool:
+    """Heuristic: flag if any point is within `relative_threshold` of max,
+    and flat plateaus of ≥3 consecutive points at max exist.
+    """
+    if len(y) < 3:
+        return False
+    y_max = float(np.max(y))
+    if y_max <= 0:
+        return False
+    flat = np.abs(y - y_max) <= (1.0 - relative_threshold) * y_max
+    # Flag if ≥3 consecutive saturated samples
+    run = 0
+    for f in flat:
+        if f:
+            run += 1
+            if run >= 3:
+                return True
+        else:
+            run = 0
+    return False
+
+
+def compute_spectrum_qc(
+    y_raw: np.ndarray,
+    y_final: np.ndarray,
+    x: np.ndarray,
+    noise_region: Tuple[float, float] = (1800.0, 2000.0),
+    sat_threshold: float = 0.98,
+) -> Dict[str, Any]:
+    """Return a per-spectrum QC dict."""
+    snr = compute_snr(y_final, x, noise_region=noise_region)
+    saturated = detect_saturation(y_raw, relative_threshold=sat_threshold)
+    has_nan = bool(np.any(~np.isfinite(y_final)))
+    flag = "OK"
+    if saturated:
+        flag = "SATURATED"
+    elif has_nan:
+        flag = "NAN_OR_INF"
+    elif np.isfinite(snr) and snr < 10.0:
+        flag = "LOW_SNR"
+    return {
+        "snr_db": snr,
+        "saturated": saturated,
+        "has_nan": has_nan,
+        "flag": flag,
+    }
+
+
+# ───────────────────────── Peak Detection & Fitting ─────────────────────────
+
+
+def detect_peaks(
+    x: np.ndarray,
+    y: np.ndarray,
+    prominence: Optional[float] = None,
+    prominence_percent: float = 2.0,
+    min_distance_pts: int = 5,
+    height: Optional[float] = None,
+    width_pts: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Detect peaks via scipy.signal.find_peaks.
+
+    prominence_percent: if `prominence` is None, uses percent-of-(max-min) heuristic.
+    Returns dict with indices, x positions, heights, prominences, and FWHM (cm^-1).
+    """
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+
+    if prominence is None:
+        y_range = float(np.max(y) - np.min(y))
+        prominence = max(1e-12, prominence_percent / 100.0 * y_range)
+
+    peaks, props = find_peaks(
+        y,
+        prominence=prominence,
+        distance=max(1, int(min_distance_pts)),
+        height=height,
+        width=width_pts,
+    )
+
+    # FWHM in x-units
+    if len(peaks) > 0:
+        widths_pts, _, left_ips, right_ips = peak_widths(y, peaks, rel_height=0.5)
+        # Convert fractional index positions to x via linear interpolation
+        def _idx_to_x(idx_frac):
+            lo = int(np.floor(idx_frac))
+            hi = min(lo + 1, len(x) - 1)
+            frac = idx_frac - lo
+            return x[lo] * (1 - frac) + x[hi] * frac
+        left_x = np.array([_idx_to_x(i) for i in left_ips])
+        right_x = np.array([_idx_to_x(i) for i in right_ips])
+        fwhm_x = np.abs(right_x - left_x)
+    else:
+        fwhm_x = np.array([])
+
+    return {
+        "indices": peaks,
+        "positions": x[peaks] if len(peaks) else np.array([]),
+        "heights": y[peaks] if len(peaks) else np.array([]),
+        "prominences": props.get("prominences", np.array([])),
+        "fwhm": fwhm_x,
+        "prominence_used": prominence,
+    }
+
+
+def fit_peaks(
+    x: np.ndarray,
+    y: np.ndarray,
+    peak_positions: np.ndarray,
+    profile: str = 'gaussian',
+    fit_window: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Fit a multi-peak model using lmfit.
+
+    profile: 'gaussian' | 'lorentzian' | 'voigt' | 'pseudovoigt'
+    fit_window: if given, restrict fit to x within [min(pos)-w, max(pos)+w] cm^-1.
+    """
+    if not _LMFIT_AVAILABLE:
+        raise RuntimeError("lmfit is not installed. Run: pip install lmfit")
+    if profile not in PEAK_PROFILES:
+        raise ValueError(f"Unknown peak profile: {profile}")
+    if len(peak_positions) == 0:
+        raise ValueError("No peaks supplied for fitting.")
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    if fit_window is not None:
+        lo = float(np.min(peak_positions)) - fit_window
+        hi = float(np.max(peak_positions)) + fit_window
+        mask = (x >= lo) & (x <= hi)
+        x_fit = x[mask]
+        y_fit = y[mask]
+    else:
+        x_fit = x
+        y_fit = y
+
+    model_cls = {
+        'gaussian': GaussianModel,
+        'lorentzian': LorentzianModel,
+        'voigt': VoigtModel,
+        'pseudovoigt': PseudoVoigtModel,
+    }[profile]
+
+    composite = None
+    params = None
+    x_range = float(np.max(x_fit) - np.min(x_fit))
+    approx_sigma = max(x_range / 100.0, 1.0)
+
+    for i, pos in enumerate(peak_positions):
+        prefix = f"p{i}_"
+        m = model_cls(prefix=prefix)
+        # Amplitude guess from y near pos
+        near_idx = int(np.argmin(np.abs(x_fit - pos)))
+        approx_amp = float(y_fit[near_idx]) * approx_sigma * 2.5
+        p = m.make_params()
+        p[f"{prefix}center"].set(value=float(pos), min=float(pos) - approx_sigma * 5,
+                                 max=float(pos) + approx_sigma * 5)
+        p[f"{prefix}sigma"].set(value=approx_sigma, min=1e-6, max=x_range)
+        p[f"{prefix}amplitude"].set(value=max(approx_amp, 1e-6), min=0)
+        if composite is None:
+            composite = m
+            params = p
+        else:
+            composite = composite + m
+            params.update(p)
+
+    result = composite.fit(y_fit, params, x=x_fit)
+
+    # Per-peak summary
+    peaks_out: List[Dict[str, Any]] = []
+    for i in range(len(peak_positions)):
+        prefix = f"p{i}_"
+        c = result.params.get(f"{prefix}center")
+        s = result.params.get(f"{prefix}sigma")
+        a = result.params.get(f"{prefix}amplitude")
+        # FWHM / height: use computed component result for robustness
+        comp_vals = result.eval_components(x=x_fit).get(prefix, None)
+        if comp_vals is not None and len(comp_vals) > 0:
+            height = float(np.max(comp_vals))
+            area = float(np.trapezoid(comp_vals, x_fit))
+        else:
+            height = float('nan')
+            area = float('nan')
+        # FWHM conversions
+        if profile == 'gaussian':
+            fwhm = float(2.3548200 * s.value) if s is not None else float('nan')
+        elif profile == 'lorentzian':
+            fwhm = float(2.0 * s.value) if s is not None else float('nan')
+        else:
+            fwhm = float(2.3548200 * s.value) if s is not None else float('nan')
+        peaks_out.append({
+            "index": i,
+            "center": float(c.value) if c is not None else float('nan'),
+            "sigma": float(s.value) if s is not None else float('nan'),
+            "amplitude": float(a.value) if a is not None else float('nan'),
+            "fwhm": fwhm,
+            "height": height,
+            "area": area,
+        })
+
+    ss_res = float(np.sum((y_fit - result.best_fit) ** 2))
+    ss_tot = float(np.sum((y_fit - np.mean(y_fit)) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else float('nan')
+
+    return {
+        "profile": profile,
+        "peaks": peaks_out,
+        "x_fit": x_fit,
+        "y_fit": y_fit,
+        "best_fit": result.best_fit,
+        "components": result.eval_components(x=x_fit),
+        "r_squared": r_squared,
+        "chisqr": float(result.chisqr),
+        "redchi": float(result.redchi),
+        "n_peaks": len(peak_positions),
+        "report": result.fit_report(),
+    }
+
+
+# ───────────────────────── PCA Scaling Helpers ─────────────────────────
+
+
+def apply_pca_scaling(data: np.ndarray, method: str = 'auto') -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """Apply scaling before PCA.
+
+    - 'auto'   : mean-center + unit variance (StandardScaler default)
+    - 'mean'   : mean-center only (preserves relative variance)
+    - 'pareto' : mean-center, divide by sqrt(std) — between 'mean' and 'auto'
+    - 'none'   : no scaling
+    """
+    if method not in PCA_SCALING_METHODS:
+        raise ValueError(f"Unknown PCA scaling method: {method}")
+
+    data = np.asarray(data, dtype=float)
+    if method == 'auto':
+        scaler = StandardScaler()
+        scaled = scaler.fit_transform(data)
+        return scaled, {"mean_": scaler.mean_, "scale_": scaler.scale_}
+    if method == 'mean':
+        mean_ = data.mean(axis=0)
+        return data - mean_, {"mean_": mean_, "scale_": np.ones_like(mean_)}
+    if method == 'pareto':
+        mean_ = data.mean(axis=0)
+        std_ = data.std(axis=0)
+        sqrt_std = np.sqrt(np.where(std_ == 0, 1.0, std_))
+        return (data - mean_) / sqrt_std, {"mean_": mean_, "scale_": sqrt_std}
+    return data.copy(), {"mean_": np.zeros(data.shape[1]), "scale_": np.ones(data.shape[1])}
 
 
 # ───────────────────────── Normalization ─────────────────────────
@@ -364,6 +677,16 @@ class DataProcessor:
 
         y_final = y_mid - baseline
 
+        # Optional derivative transformation (baseline alternative / peak sharpening)
+        deriv_cfg = params.get('derivative', {})
+        if isinstance(deriv_cfg, dict) and deriv_cfg.get('enabled', False):
+            y_final = compute_derivative(
+                y_final,
+                order=int(deriv_cfg.get('order', 1)),
+                window=int(deriv_cfg.get('window', 15)),
+                polyorder=int(deriv_cfg.get('polyorder', 3)),
+            )
+
         norm_method = params.get('normalization', 'none')
         if norm_method and norm_method != 'none':
             y_final = normalize_spectrum(y_final, method=norm_method)
@@ -401,9 +724,30 @@ class DataProcessor:
         processed_df = pd.DataFrame(valid_data, columns=valid_names)
         processed_df.insert(0, 'Raman shift (cm-1)', self.x)
 
+        # Per-spectrum QC
+        qc_cfg = params.get('qc', {}) if isinstance(params, dict) else {}
+        noise_region = tuple(qc_cfg.get('snr_noise_region', (1800.0, 2000.0)))
+        sat_thr = float(qc_cfg.get('saturation_relative', 0.98))
+
+        qc_rows = []
+        for idx in valid_indices:
+            qc = compute_spectrum_qc(
+                self.y_raw[:, idx],
+                results[:, idx],
+                self.x,
+                noise_region=noise_region,
+                sat_threshold=sat_thr,
+            )
+            qc["sample"] = self.sample_names[idx]
+            qc_rows.append(qc)
+        qc_df = pd.DataFrame(qc_rows, columns=['sample', 'snr_db', 'saturated', 'has_nan', 'flag'])
+
+        n_flagged = int(np.sum(qc_df['flag'] != 'OK')) if not qc_df.empty else 0
         summary = {
             "processed": len(valid_indices),
             "failed": total_spectra - len(valid_indices),
+            "qc_flagged": n_flagged,
+            "qc_df": qc_df,
         }
         return processed_df, summary
 
@@ -465,8 +809,17 @@ class DataProcessor:
     # ── PCA ────────────────────────────────────────────────────────
 
     def perform_pca(
-        self, processed_df: pd.DataFrame, n_components: int = 10
+        self,
+        processed_df: pd.DataFrame,
+        n_components: int = 10,
+        scaling: str = 'auto',
+        confidence: float = 0.95,
     ) -> Dict[str, Any]:
+        """Perform PCA with diagnostics (Hotelling T², Q-residuals, scaling options).
+
+        scaling: 'auto' | 'mean' | 'pareto' | 'none'
+        confidence: for T²/Q control limits (0.95 / 0.99 typical)
+        """
         if processed_df.shape[1] < 2:
             raise ValueError("PCA requires at least 2 samples.")
 
@@ -475,8 +828,7 @@ class DataProcessor:
         data_transposed = intensity_data.T
         n_samples = data_transposed.shape[0]
 
-        scaler = StandardScaler()
-        data_scaled = scaler.fit_transform(data_transposed)
+        data_scaled, scale_info = apply_pca_scaling(data_transposed, method=scaling)
 
         n_components = min(n_components, n_samples, data_scaled.shape[1])
 
@@ -485,6 +837,54 @@ class DataProcessor:
 
         eigenvalues = pca.explained_variance_ * (n_samples - 1)
         kaiser_components = int(np.sum(eigenvalues > 1))
+
+        # Hotelling T² = Σ (t_i² / λ_i)
+        explained_variance = pca.explained_variance_
+        safe_var = np.where(explained_variance > 0, explained_variance, 1.0)
+        t2 = np.sum((scores ** 2) / safe_var, axis=1)
+
+        # T² confidence limit via F-distribution
+        # T²_lim = k(n-1)/(n-k) * F(alpha; k, n-k)
+        k = n_components
+        n = n_samples
+        if n - k > 0:
+            f_crit = f_dist.ppf(confidence, k, n - k)
+            t2_limit = k * (n - 1) / (n - k) * f_crit
+        else:
+            t2_limit = float('nan')
+
+        # Q-residuals (SPE) = Σ (x - x_hat)²  per sample
+        reconstruction = scores @ pca.components_
+        residuals = data_scaled - reconstruction
+        q_residuals = np.sum(residuals ** 2, axis=1)
+
+        # Jackson-Mudholkar Q-limit
+        # Requires eigenvalues of residual subspace — use full PCA to estimate
+        full_pca = PCA(n_components=min(n_samples, data_scaled.shape[1]))
+        full_pca.fit(data_scaled)
+        all_eig = full_pca.explained_variance_
+        if k < len(all_eig):
+            residual_eig = all_eig[k:]
+            theta1 = float(np.sum(residual_eig))
+            theta2 = float(np.sum(residual_eig ** 2))
+            theta3 = float(np.sum(residual_eig ** 3))
+            if theta1 > 0 and theta2 > 0:
+                h0 = 1.0 - (2.0 * theta1 * theta3) / (3.0 * theta2 ** 2)
+                from scipy.stats import norm
+                c_alpha = norm.ppf(confidence)
+                try:
+                    q_limit = theta1 * (
+                        c_alpha * np.sqrt(2.0 * theta2 * h0 ** 2) / theta1
+                        + 1.0
+                        + theta2 * h0 * (h0 - 1.0) / (theta1 ** 2)
+                    ) ** (1.0 / h0)
+                    q_limit = float(q_limit)
+                except (ValueError, ZeroDivisionError):
+                    q_limit = float('nan')
+            else:
+                q_limit = float('nan')
+        else:
+            q_limit = float('nan')
 
         results = {
             "scores": scores,
@@ -498,8 +898,17 @@ class DataProcessor:
             "n_components_selected": n_components,
             "sample_names": processed_df.columns[1:].tolist(),
             "raman_shifts": raman_shifts,
+            "scaling_method": scaling,
+            "hotelling_t2": t2,
+            "t2_limit": t2_limit,
+            "q_residuals": q_residuals,
+            "q_limit": q_limit,
+            "confidence": confidence,
         }
-        logging.info(f"PCA performed with {n_components} components.")
+        logging.info(
+            f"PCA ({scaling} scaling) performed: {n_components} components, "
+            f"T2_lim={t2_limit:.3g}, Q_lim={q_limit:.3g}"
+        )
         return results
 
     # ── NMF ────────────────────────────────────────────────────────

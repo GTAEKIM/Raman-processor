@@ -12,10 +12,11 @@ import pandas as pd
 import os
 import sys
 
-from processing_logic import DataProcessor, ProcessingStage, normalize_spectrum
+from processing_logic import DataProcessor, ProcessingStage, normalize_spectrum, compute_derivative
 from baseline_corrector_app import BaselineCorrectorWindow
 from pca_result_window import PCAResultWindow
 from nmf_result_window import NMFResultWindow
+from peak_analysis_window import PeakAnalysisWindow
 
 logging.basicConfig(
     filename='app.log',
@@ -40,7 +41,7 @@ class CustomToolbar(NavigationToolbar2Tk):
 class RamanProcessorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Raman Spectroscopy Processor v2.1")
+        self.root.title("Raman Spectroscopy Processor v2.2")
         self.root.geometry("1280x820")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -105,6 +106,41 @@ class RamanProcessorApp:
         )
         self.nmf_random_state = tk.IntVar(value=nmf_defaults.get("random_state", 0))
         self.nmf_n_components = tk.IntVar(value=nmf_defaults.get("n_components", 3))
+
+        # Derivative transform
+        deriv_defaults = defaults.get(
+            "derivative", {"enabled": False, "order": 1, "window": 15, "polyorder": 3}
+        ) if False else self.config.get(
+            "derivative", {"enabled": False, "order": 1, "window": 15, "polyorder": 3}
+        )
+        self.deriv_enabled = tk.BooleanVar(value=deriv_defaults.get("enabled", False))
+        self.deriv_order = tk.IntVar(value=deriv_defaults.get("order", 1))
+        self.deriv_window = tk.IntVar(value=deriv_defaults.get("window", 15))
+        self.deriv_polyorder = tk.IntVar(value=deriv_defaults.get("polyorder", 3))
+
+        # PCA scaling
+        self.pca_scaling_methods = self.config.get(
+            "pca_scaling_methods",
+            {"auto": "Auto-scale (unit variance)", "mean": "Mean-center only",
+             "pareto": "Pareto (sqrt std)", "none": "No scaling"},
+        )
+        self._pca_code_to_name = self.pca_scaling_methods
+        self._pca_name_to_code = {v: k for k, v in self.pca_scaling_methods.items()}
+        self.pca_scaling_code = tk.StringVar(value="auto")
+        self.pca_scaling_name = tk.StringVar(
+            value=self._pca_code_to_name.get("auto", "Auto-scale (unit variance)")
+        )
+        self.pca_confidence = tk.DoubleVar(value=0.95)
+
+        # QC config passthrough
+        self.qc_cfg = self.config.get("qc", {
+            "snr_noise_region": [1800, 2000], "saturation_relative": 0.98,
+        })
+
+        # Peak detection config
+        self.peak_cfg = self.config.get("peak_detection", {
+            "prominence_percent": 2.0, "min_distance": 5, "default_profile": "gaussian",
+        })
 
         # Display / preprocess
         self.show_raw = tk.BooleanVar(value=True)
@@ -282,6 +318,30 @@ class RamanProcessorApp:
             norm_frame, text="Apply Normalization", command=self._apply_normalization
         ).pack(fill="x", padx=5, pady=(0, 5))
 
+        # 5b. Derivative (applied after baseline, before normalization)
+        deriv_frame = ttk.LabelFrame(panel, text="5b. Derivative (optional)")
+        deriv_frame.pack(fill="x", pady=5, padx=2)
+        ttk.Checkbutton(
+            deriv_frame,
+            text="Apply derivative to Final",
+            variable=self.deriv_enabled,
+            command=self._on_derivative_toggle,
+        ).pack(anchor="w", padx=5)
+        drow = ttk.Frame(deriv_frame); drow.pack(fill="x", padx=5, pady=2)
+        ttk.Label(drow, text="Order:").pack(side="left")
+        ttk.Entry(drow, textvariable=self.deriv_order, width=4).pack(side="left", padx=2)
+        ttk.Label(drow, text="Win:").pack(side="left", padx=(6, 0))
+        ttk.Entry(drow, textvariable=self.deriv_window, width=4).pack(side="left", padx=2)
+        ttk.Label(drow, text="Poly:").pack(side="left", padx=(6, 0))
+        ttk.Entry(drow, textvariable=self.deriv_polyorder, width=4).pack(side="left", padx=2)
+
+        # 5c. Peak analysis
+        peak_frame = ttk.LabelFrame(panel, text="5c. Peak Analysis")
+        peak_frame.pack(fill="x", pady=5, padx=2)
+        ttk.Button(
+            peak_frame, text="Detect & Fit Peaks...", command=self._open_peak_analysis
+        ).pack(fill="x", padx=5, pady=5)
+
         # 6. Export
         export_frame = ttk.LabelFrame(panel, text="6. Export")
         export_frame.pack(fill="x", pady=5, padx=2)
@@ -310,9 +370,24 @@ class RamanProcessorApp:
 
         ttk.Separator(batch_frame, orient="horizontal").pack(fill="x", pady=5)
 
+        pca_scaling_row = ttk.Frame(batch_frame)
+        pca_scaling_row.pack(fill="x", pady=2, padx=5)
+        ttk.Label(pca_scaling_row, text="PCA Scaling:").pack(side="left")
+        pca_combo = ttk.Combobox(
+            pca_scaling_row,
+            textvariable=self.pca_scaling_name,
+            values=list(self._pca_code_to_name.values()),
+            state="readonly",
+            width=22,
+        )
+        pca_combo.pack(side="right")
+        pca_combo.bind("<<ComboboxSelected>>", self._on_pca_scaling_change)
+
         pca_frame = ttk.Frame(batch_frame)
         pca_frame.pack(fill="x", pady=2, padx=5)
         ttk.Button(pca_frame, text="Run PCA", command=self._run_pca_analysis).pack(side="left")
+        ttk.Label(pca_frame, text="Conf:").pack(side="right")
+        ttk.Entry(pca_frame, textvariable=self.pca_confidence, width=6).pack(side="right", padx=2)
 
         nmf_frame = ttk.Frame(batch_frame)
         nmf_frame.pack(fill="x", pady=2, padx=5)
@@ -607,6 +682,18 @@ class RamanProcessorApp:
             return
 
         self.y_final = self.y_mid - self.baseline
+        # Apply derivative transform if enabled (before normalization)
+        if self.deriv_enabled.get():
+            try:
+                self.y_final = compute_derivative(
+                    self.y_final,
+                    order=self.deriv_order.get(),
+                    window=self.deriv_window.get(),
+                    polyorder=self.deriv_polyorder.get(),
+                )
+            except Exception as e:
+                messagebox.showerror("Derivative Error", f"Failed: {e}")
+                return
         self.last_processing_stage = ProcessingStage.BASELINE_CORRECTED
         self._update_display()
         self._update_status("Baseline correction applied.")
@@ -630,12 +717,23 @@ class RamanProcessorApp:
             self._update_status("Normalization cleared — display restored.")
             return
 
-        # Always re-compute from (y_mid - baseline) to avoid compounding
-        base = (
-            self.y_mid - self.baseline
-            if (self.y_mid is not None and self.baseline is not None)
-            else self.y_final
-        )
+        # Always re-compute from (y_mid - baseline) [+ derivative if enabled]
+        # to avoid compounding effects
+        if self.y_mid is not None and self.baseline is not None:
+            base = self.y_mid - self.baseline
+            if self.deriv_enabled.get():
+                try:
+                    base = compute_derivative(
+                        base,
+                        order=self.deriv_order.get(),
+                        window=self.deriv_window.get(),
+                        polyorder=self.deriv_polyorder.get(),
+                    )
+                except Exception as e:
+                    messagebox.showerror("Derivative Error", f"Failed: {e}")
+                    return
+        else:
+            base = self.y_final
         self.y_final = normalize_spectrum(base, method=method)
         self.last_processing_stage = ProcessingStage.NORMALIZED
 
@@ -649,6 +747,37 @@ class RamanProcessorApp:
         self._update_status(
             f"Normalization applied: {method.upper()}  "
             f"(Raw/Smooth/Baseline hidden — scale mismatch)"
+        )
+
+    def _on_derivative_toggle(self):
+        """Re-run pipeline if we already have processed data."""
+        if self.last_processing_stage in (
+            ProcessingStage.BASELINE_CORRECTED, ProcessingStage.NORMALIZED
+        ):
+            self._run_full_processing()
+
+    def _on_pca_scaling_change(self, event=None):
+        name = self.pca_scaling_name.get()
+        code = self._pca_name_to_code.get(name, "auto")
+        self.pca_scaling_code.set(code)
+
+    def _open_peak_analysis(self):
+        if self.y_final is None or self.processor.x is None:
+            messagebox.showwarning(
+                "Peak Analysis",
+                "Run smoothing + baseline correction first so a Final spectrum is available.",
+            )
+            return
+        idx = self.current_selection_idx
+        name = self.processor.sample_names[idx] if idx is not None else ""
+        PeakAnalysisWindow(
+            parent=self.root,
+            x=self.processor.x,
+            y=self.y_final,
+            sample_name=name,
+            default_prominence_percent=float(self.peak_cfg.get("prominence_percent", 2.0)),
+            default_min_distance=int(self.peak_cfg.get("min_distance", 5)),
+            default_profile=str(self.peak_cfg.get("default_profile", "gaussian")),
         )
 
     def _on_norm_change(self, event=None):
@@ -696,6 +825,17 @@ class RamanProcessorApp:
         self.baseline_params = final_params
         self.baseline = final_baseline
         self.y_final = self.y_mid - self.baseline
+        if self.deriv_enabled.get():
+            try:
+                self.y_final = compute_derivative(
+                    self.y_final,
+                    order=self.deriv_order.get(),
+                    window=self.deriv_window.get(),
+                    polyorder=self.deriv_polyorder.get(),
+                )
+            except Exception as e:
+                messagebox.showerror("Derivative Error", f"Failed: {e}")
+                return
         self.last_processing_stage = ProcessingStage.BASELINE_CORRECTED
         self.baseline_algo_label.config(text=self._baseline_summary())
         if self.normalization_code.get() != 'none':
@@ -754,6 +894,17 @@ class RamanProcessorApp:
                 "n_components": self.nmf_n_components.get(),
                 "random_state": self.nmf_random_state.get(),
             },
+            "derivative": {
+                "enabled": self.deriv_enabled.get(),
+                "order": self.deriv_order.get(),
+                "window": self.deriv_window.get(),
+                "polyorder": self.deriv_polyorder.get(),
+            },
+            "pca": {
+                "scaling": self.pca_scaling_code.get(),
+                "confidence": self.pca_confidence.get(),
+            },
+            "qc": self.qc_cfg,
         }
 
     def _export_data(self, data_dict: Dict[str, np.ndarray], default_filename: str):
@@ -856,20 +1007,27 @@ class RamanProcessorApp:
             with self._batch_lock:
                 self.batch_result_df = processed_df
 
-            processed_df.set_index('Raman shift (cm-1)').T.to_excel(
-                output_path, header=True, index=True
-            )
+            qc_df = summary.get('qc_df')
+            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+                processed_df.set_index('Raman shift (cm-1)').T.to_excel(
+                    writer, sheet_name='Processed', header=True, index=True
+                )
+                if qc_df is not None and not qc_df.empty:
+                    qc_df.to_excel(writer, sheet_name='QC', index=False)
+
             json_filepath = os.path.splitext(output_path)[0] + '.json'
             with open(json_filepath, 'w', encoding='utf-8') as f:
                 json.dump(params, f, indent=4)
 
             elapsed = time.time() - start_time
             mode = f"parallel (n_jobs={n_jobs})" if parallel else "serial"
+            qc_flagged = summary.get('qc_flagged', 0)
             result_message = (
                 f"Batch process complete!\n\n"
                 f"Mode: {mode}\n"
                 f"Processed: {summary['processed']}\n"
                 f"Failed: {summary['failed']}\n"
+                f"QC Flagged: {qc_flagged}\n"
                 f"Time: {elapsed:.2f}s"
             )
             self.root.after(0, lambda: messagebox.showinfo("Success", result_message))
@@ -894,7 +1052,11 @@ class RamanProcessorApp:
 
         try:
             analysis_params = self._collect_current_params()
-            pca_results = self.processor.perform_pca(batch_df)
+            pca_results = self.processor.perform_pca(
+                batch_df,
+                scaling=self.pca_scaling_code.get(),
+                confidence=float(self.pca_confidence.get()),
+            )
             PCAResultWindow(self.root, pca_results, analysis_params)
         except Exception as e:
             messagebox.showerror("PCA Error", f"Failed to perform PCA.\nError: {e}")
