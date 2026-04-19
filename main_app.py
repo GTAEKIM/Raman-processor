@@ -12,7 +12,10 @@ import pandas as pd
 import os
 import sys
 
-from processing_logic import DataProcessor, ProcessingStage, normalize_spectrum, compute_derivative
+from processing_logic import (
+    DataProcessor, ProcessingStage, normalize_spectrum, compute_derivative,
+    load_baseline_plugins, get_baseline_plugins,
+)
 from baseline_corrector_app import BaselineCorrectorWindow
 from pca_result_window import PCAResultWindow
 from nmf_result_window import NMFResultWindow
@@ -20,6 +23,7 @@ from peak_analysis_window import PeakAnalysisWindow
 from clustering_window import ClusteringWindow
 from mcr_als_window import MCRALSWindow
 from calibration_window import CalibrationWindow
+from mapping_window import MappingWindow
 
 logging.basicConfig(
     filename='app.log',
@@ -44,12 +48,25 @@ class CustomToolbar(NavigationToolbar2Tk):
 class RamanProcessorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Raman Spectroscopy Processor v2.3")
+        self.root.title("Raman Spectroscopy Processor v2.4")
         self.root.geometry("1280x820")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         self.processor = DataProcessor()
         self.config = self._load_config()
+
+        # Auto-load baseline plugins from ./plugins
+        try:
+            plugin_dir = resource_path("plugins")
+            n = load_baseline_plugins(plugin_dir)
+            if n:
+                logging.info(f"Loaded {n} baseline plugin(s)")
+                # Register into algorithm display list
+                algos = self.config.setdefault("baseline_algorithms", {})
+                for code, info in get_baseline_plugins().items():
+                    algos[code] = info["display_name"]
+        except Exception as e:
+            logging.error(f"Plugin loading failed: {e}")
 
         # Spectrum state
         self.y_raw: Optional[np.ndarray] = None
@@ -212,9 +229,10 @@ class RamanProcessorApp:
         btn_configs = [
             ("folder-open-outline.png", "Import Data", self._import_data),
             ("parameters-import.png", "Import Parameters", self._import_params),
+            (None, "Hyperspectral Mapping", self._open_mapping),
         ]
         for icon_file, text, cmd in btn_configs:
-            icon = self._load_icon(icon_file)
+            icon = self._load_icon(icon_file) if icon_file else None
             btn = ttk.Button(toolbar, image=icon, text=text, compound=tk.LEFT, command=cmd)
             btn.pack(side=tk.LEFT, padx=2, pady=2)
 
@@ -1106,6 +1124,18 @@ class RamanProcessorApp:
         CalibrationWindow(
             self.root, self.processor,
             on_applied=self._on_calibration_applied,
+        )
+
+    def _open_mapping(self):
+        MappingWindow(self.root, on_cube_to_batch=self._ingest_cube_dataframe)
+
+    def _ingest_cube_dataframe(self, cube_df):
+        """Receive a pixel-as-sample DataFrame from the mapping window."""
+        with self._batch_lock:
+            self.batch_result_df = cube_df
+        self._update_status(
+            f"Mapping cube ingested: {cube_df.shape[1] - 1} pixels available for "
+            "PCA / NMF / MCR-ALS / Clustering."
         )
 
     def _on_calibration_applied(self):

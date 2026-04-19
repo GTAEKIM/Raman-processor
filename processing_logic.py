@@ -600,6 +600,12 @@ class DataProcessor:
             )
             return baseline
 
+        # Plugin fallback
+        if algorithm in _BASELINE_PLUGINS:
+            plugin = _BASELINE_PLUGINS[algorithm]
+            merged = {**plugin.get("default_params", {}), **params}
+            return plugin["compute"](self.x, y_mid, merged)
+
         raise ValueError(f"Unknown baseline algorithm: {algorithm}")
 
     def baseline_polynomial(
@@ -1260,6 +1266,175 @@ def perform_mcr_als(
         "nonneg_concentrations": nonneg_concentrations,
         "nonneg_spectra": nonneg_spectra,
     }
+
+
+# ───────────────────────── Hyperspectral Mapping ─────────────────────────
+
+
+def load_mapping_file(filepath: str) -> Dict[str, Any]:
+    """Load a hyperspectral Raman mapping file.
+
+    Expected layout (wide):
+      Row 0  : "X" | "Y" | shift_1 | shift_2 | ...
+      Row 1+ : x   | y   | I(x,y,s1) | I(x,y,s2) | ...
+
+    Returns dict with raman_shifts, x_coords (1D unique sorted), y_coords (1D),
+    and a 3D cube indexed [yi, xi, si].
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == '.csv':
+        df = pd.read_csv(filepath)
+    elif ext in ('.xlsx', '.xls'):
+        df = pd.read_excel(filepath)
+    elif ext in ('.txt', '.asc', '.dat'):
+        raw = _load_text_file(filepath)
+        # First row treated as header
+        df = pd.DataFrame(raw.iloc[1:].values, columns=raw.iloc[0].tolist())
+    else:
+        raise ValueError(f"Unsupported mapping file format: {ext}")
+
+    cols = [str(c).strip() for c in df.columns]
+    if len(cols) < 3:
+        raise ValueError("Mapping file must have at least 3 columns: X, Y, and >=1 shift.")
+    if cols[0].upper() not in ('X', 'X_POS', 'X_POSITION') or \
+       cols[1].upper() not in ('Y', 'Y_POS', 'Y_POSITION'):
+        # Try positional fallback
+        logging.warning(
+            "Mapping header not 'X','Y' — using first two columns as positions."
+        )
+
+    x_pos = df.iloc[:, 0].values.astype(float)
+    y_pos = df.iloc[:, 1].values.astype(float)
+    raman_shifts = np.array([float(c) for c in cols[2:]], dtype=float)
+    intensities = df.iloc[:, 2:].values.astype(float)  # (n_pixels, n_shifts)
+
+    x_unique = np.unique(x_pos)
+    y_unique = np.unique(y_pos)
+    nx, ny = len(x_unique), len(y_unique)
+    n_shifts = len(raman_shifts)
+
+    # Build cube [yi, xi, si]
+    cube = np.full((ny, nx, n_shifts), np.nan, dtype=float)
+    x_to_idx = {v: i for i, v in enumerate(x_unique)}
+    y_to_idx = {v: i for i, v in enumerate(y_unique)}
+    for row in range(len(x_pos)):
+        xi = x_to_idx[x_pos[row]]
+        yi = y_to_idx[y_pos[row]]
+        cube[yi, xi, :] = intensities[row]
+
+    logging.info(
+        f"Loaded mapping {nx}x{ny} pixels, {n_shifts} shifts from {filepath}"
+    )
+    return {
+        "cube": cube,
+        "raman_shifts": raman_shifts,
+        "x_coords": x_unique,
+        "y_coords": y_unique,
+        "n_pixels": len(x_pos),
+    }
+
+
+def integrate_band(
+    cube: np.ndarray,
+    raman_shifts: np.ndarray,
+    band: Tuple[float, float],
+    method: str = 'trapezoid',
+) -> np.ndarray:
+    """Integrate a spectral band to a 2D intensity map.
+
+    method: 'trapezoid' (area under curve) | 'sum' | 'max' | 'mean'
+    Returns 2D array shaped (ny, nx).
+    """
+    lo, hi = sorted(band)
+    mask = (raman_shifts >= lo) & (raman_shifts <= hi)
+    if not np.any(mask):
+        raise ValueError(f"No Raman shifts within band {band}")
+    sub = cube[:, :, mask]
+    if method == 'trapezoid':
+        return np.trapezoid(sub, raman_shifts[mask], axis=-1)
+    if method == 'sum':
+        return np.sum(sub, axis=-1)
+    if method == 'max':
+        return np.max(sub, axis=-1)
+    if method == 'mean':
+        return np.mean(sub, axis=-1)
+    raise ValueError(f"Unknown integration method: {method}")
+
+
+def cube_to_batch_df(cube: np.ndarray, raman_shifts: np.ndarray) -> pd.DataFrame:
+    """Flatten a mapping cube into a batch-style DataFrame for PCA/NMF/MCR.
+
+    Each pixel becomes a 'sample' named "x{xi}_y{yi}".
+    """
+    ny, nx, ns = cube.shape
+    data = cube.reshape(ny * nx, ns)
+    # Drop NaN rows
+    valid = ~np.any(np.isnan(data), axis=1)
+    names = [f"x{xi}_y{yi}" for yi in range(ny) for xi in range(nx)]
+    names = [n for n, ok in zip(names, valid) if ok]
+    df = pd.DataFrame(data[valid].T, columns=names)
+    df.insert(0, 'Raman shift (cm-1)', raman_shifts)
+    return df
+
+
+# ───────────────────────── Plugin Registry ─────────────────────────
+
+
+_BASELINE_PLUGINS: Dict[str, Dict[str, Any]] = {}
+
+
+def register_baseline_plugin(
+    short_code: str,
+    display_name: str,
+    compute_fn: Callable[[np.ndarray, np.ndarray, Dict[str, Any]], np.ndarray],
+    default_params: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Register a custom baseline algorithm.
+
+    compute_fn signature: (x, y, params_dict) -> baseline array
+    """
+    _BASELINE_PLUGINS[short_code] = {
+        "display_name": display_name,
+        "compute": compute_fn,
+        "default_params": default_params or {},
+    }
+    logging.info(f"Registered baseline plugin: {short_code} ({display_name})")
+
+
+def get_baseline_plugins() -> Dict[str, Dict[str, Any]]:
+    return dict(_BASELINE_PLUGINS)
+
+
+def load_baseline_plugins(plugin_dir: str) -> int:
+    """Auto-discover and import all *.py modules in plugin_dir/baseline.
+
+    Each plugin module must define a top-level `register(registry)` callable
+    that calls registry['register'](...).
+    """
+    target = os.path.join(plugin_dir, 'baseline')
+    if not os.path.isdir(target):
+        return 0
+    import importlib.util
+
+    count = 0
+    for fname in sorted(os.listdir(target)):
+        if not fname.endswith('.py') or fname.startswith('_'):
+            continue
+        path = os.path.join(target, fname)
+        modname = f"_baseline_plugin_{os.path.splitext(fname)[0]}"
+        try:
+            spec = importlib.util.spec_from_file_location(modname, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if hasattr(mod, 'register'):
+                mod.register({"register": register_baseline_plugin})
+                count += 1
+            else:
+                logging.warning(f"Baseline plugin {fname} has no register() function.")
+        except Exception as e:
+            logging.error(f"Failed to load baseline plugin {fname}: {e}")
+    logging.info(f"Loaded {count} baseline plugin(s) from {target}")
+    return count
 
 
 # ───────────────────────── Wavelength Calibration ─────────────────────────
