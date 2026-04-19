@@ -2,6 +2,10 @@ import pandas as pd
 import numpy as np
 from scipy.signal import savgol_filter, find_peaks, peak_widths
 from scipy.stats import f as f_dist
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import pdist
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from typing import Tuple, Dict, Any, Callable, Optional, List
 import os
 import logging
@@ -20,7 +24,21 @@ try:
     _LMFIT_AVAILABLE = True
 except ImportError:
     _LMFIT_AVAILABLE = False
-    logging.warning("lmfit not installed — peak fitting disabled.")
+    logging.warning("lmfit not installed - peak fitting disabled.")
+
+try:
+    import umap
+    _UMAP_AVAILABLE = True
+except ImportError:
+    _UMAP_AVAILABLE = False
+
+try:
+    from pymcr.mcr import McrAR
+    from pymcr.regressors import OLS, NNLS
+    from pymcr.constraints import ConstraintNonneg, ConstraintNorm
+    _PYMCR_AVAILABLE = True
+except ImportError:
+    _PYMCR_AVAILABLE = False
 
 
 class ProcessingStage(Enum):
@@ -452,6 +470,15 @@ class DataProcessor:
         num_spectra = self.y_raw.shape[1]
         logging.info(f"Loaded {num_spectra} spectra from {filepath}")
         return num_spectra
+
+    def recalibrate_axis(self, coefficients: np.ndarray) -> None:
+        """Apply a polynomial calibration to both x_full and x in-place."""
+        if self.x_full is None:
+            raise RuntimeError("No data loaded.")
+        self.x_full = apply_calibration(self.x_full, coefficients)
+        if self.x is not None:
+            self.x = apply_calibration(self.x, coefficients)
+        logging.info(f"Raman shift axis recalibrated with coeffs {coefficients}")
 
     def filter_data_by_range(self, lower_bound: float, upper_bound: float) -> bool:
         if self.x_full is None or self.y_raw_full is None:
@@ -1059,6 +1086,230 @@ def _load_text_file(filepath: str) -> pd.DataFrame:
 
 
 # ── Worker helper for parallel batch (module-level for pickling) ──
+
+
+# ───────────────────────── Clustering ─────────────────────────
+
+
+CLUSTERING_LINKAGE = {'ward', 'complete', 'average', 'single'}
+CLUSTERING_METRICS = {'euclidean', 'correlation', 'cosine', 'cityblock'}
+
+
+def perform_hca(
+    data: np.ndarray,
+    method: str = 'ward',
+    metric: str = 'euclidean',
+    n_clusters: int = 3,
+) -> Dict[str, Any]:
+    """Hierarchical clustering on a samples x features matrix.
+
+    Returns linkage matrix (for dendrogram), cluster labels (flat cut),
+    and cophenetic distances.
+    """
+    if method not in CLUSTERING_LINKAGE:
+        raise ValueError(f"Unknown linkage method: {method}")
+    if method == 'ward' and metric != 'euclidean':
+        metric = 'euclidean'  # ward requires Euclidean
+
+    dist = pdist(data, metric=metric)
+    Z = linkage(dist, method=method)
+    labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+
+    return {
+        "linkage": Z,
+        "labels": labels,
+        "method": method,
+        "metric": metric,
+        "n_clusters": n_clusters,
+    }
+
+
+def perform_kmeans(
+    data: np.ndarray,
+    n_clusters: int = 3,
+    random_state: int = 0,
+    k_range: Optional[Tuple[int, int]] = (2, 10),
+) -> Dict[str, Any]:
+    """K-means with elbow (inertia) and silhouette sweep over k_range."""
+    km = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+    labels = km.fit_predict(data)
+
+    inertias: List[float] = []
+    silhouettes: List[float] = []
+    ks: List[int] = []
+    if k_range is not None:
+        k_lo, k_hi = k_range
+        k_hi = min(k_hi, data.shape[0] - 1)
+        for k in range(max(2, k_lo), k_hi + 1):
+            m = KMeans(n_clusters=k, random_state=random_state, n_init=10).fit(data)
+            ks.append(k)
+            inertias.append(float(m.inertia_))
+            if k > 1 and k < data.shape[0]:
+                try:
+                    silhouettes.append(float(silhouette_score(data, m.labels_)))
+                except Exception:
+                    silhouettes.append(float('nan'))
+            else:
+                silhouettes.append(float('nan'))
+
+    return {
+        "labels": labels,
+        "centers": km.cluster_centers_,
+        "inertia": float(km.inertia_),
+        "n_clusters": n_clusters,
+        "sweep_ks": ks,
+        "sweep_inertias": inertias,
+        "sweep_silhouettes": silhouettes,
+    }
+
+
+def perform_umap(
+    data: np.ndarray,
+    n_neighbors: int = 15,
+    min_dist: float = 0.1,
+    n_components: int = 2,
+    random_state: int = 0,
+) -> np.ndarray:
+    """UMAP 2D embedding. Raises RuntimeError if umap-learn is missing."""
+    if not _UMAP_AVAILABLE:
+        raise RuntimeError("umap-learn is not installed. Run: pip install umap-learn")
+    n_neighbors = min(n_neighbors, max(2, data.shape[0] - 1))
+    reducer = umap.UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        n_components=n_components,
+        random_state=random_state,
+    )
+    return reducer.fit_transform(data)
+
+
+def prepare_cluster_matrix(processed_df: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
+    """Convert a Raman batch DataFrame into samples x features matrix."""
+    sample_names = processed_df.columns[1:].tolist()
+    data = processed_df.iloc[:, 1:].values.T  # (n_samples, n_features)
+    return data, sample_names
+
+
+# ───────────────────────── MCR-ALS ─────────────────────────
+
+
+def perform_mcr_als(
+    processed_df: pd.DataFrame,
+    n_components: int,
+    nonneg_concentrations: bool = True,
+    nonneg_spectra: bool = True,
+    norm_spectra: bool = False,
+    max_iter: int = 200,
+    tol_increase: float = 0.0,
+    init: str = 'nmf',
+    random_state: int = 0,
+) -> Dict[str, Any]:
+    """MCR-ALS via pymcr.
+
+    Decomposes D (n_samples x n_wavenumbers) = C (n_samples x k) * S^T (k x n_wn).
+    - Non-negativity constraints common for Raman (C and S both >= 0).
+    - init: 'nmf' uses NMF to seed S; 'random' uses uniform random.
+    """
+    if not _PYMCR_AVAILABLE:
+        raise RuntimeError("pymcr is not installed. Run: pip install pymcr")
+
+    raman_shifts = processed_df['Raman shift (cm-1)'].values
+    sample_names = processed_df.columns[1:].tolist()
+    D = processed_df.iloc[:, 1:].values.T  # (n_samples, n_wn)
+    D = np.maximum(0, D)
+
+    # Seed spectral estimate
+    if init == 'nmf':
+        nmf = NMF(n_components=n_components, init='nndsvda',
+                  random_state=random_state, max_iter=1000)
+        W = nmf.fit_transform(D)
+        S_init = nmf.components_  # (k, n_wn)
+    else:
+        rng = np.random.RandomState(random_state)
+        S_init = rng.rand(n_components, D.shape[1])
+
+    c_constraints = [ConstraintNonneg()] if nonneg_concentrations else []
+    st_constraints = [ConstraintNonneg()] if nonneg_spectra else []
+    if norm_spectra:
+        st_constraints.append(ConstraintNorm(axis=-1, fix_to_unity=True))
+
+    mcr = McrAR(
+        max_iter=max_iter,
+        st_regr=NNLS() if nonneg_spectra else OLS(),
+        c_regr=NNLS() if nonneg_concentrations else OLS(),
+        c_constraints=c_constraints,
+        st_constraints=st_constraints,
+        tol_increase=tol_increase,
+    )
+    mcr.fit(D, ST=S_init, verbose=False)
+
+    C = mcr.C_opt_        # concentrations (n_samples, k)
+    ST = mcr.ST_opt_      # pure spectra   (k, n_wn)
+    D_reconstructed = C @ ST
+    lof = float(100.0 * np.sqrt(np.sum((D - D_reconstructed) ** 2) / np.sum(D ** 2)))
+
+    return {
+        "concentrations": C,
+        "spectra": ST.T,  # (n_wn, k) for consistent plotting w/ NMF window
+        "n_components": n_components,
+        "n_iter": int(mcr.n_iter),
+        "lof_percent": lof,
+        "sample_names": sample_names,
+        "raman_shifts": raman_shifts,
+        "init": init,
+        "nonneg_concentrations": nonneg_concentrations,
+        "nonneg_spectra": nonneg_spectra,
+    }
+
+
+# ───────────────────────── Wavelength Calibration ─────────────────────────
+
+
+# Standard Raman reference peaks (cm^-1). Values are community consensus.
+CALIBRATION_STANDARDS: Dict[str, List[float]] = {
+    "silicon": [520.7],
+    "polystyrene": [620.9, 795.8, 1001.4, 1031.8, 1155.3, 1450.5, 1583.1, 1602.3, 3054.0],
+    "cyclohexane": [384.1, 426.3, 801.3, 1028.3, 1157.6, 1266.4, 1444.4, 2852.9, 2923.8, 2938.3],
+    "acetonitrile": [379.0, 918.0, 1374.0, 2249.0, 2942.0],
+    "ethanol": [433.0, 884.0, 1053.0, 1096.0, 1455.0, 2928.0, 2974.0],
+}
+
+
+def fit_calibration_polynomial(
+    measured_peaks: np.ndarray,
+    reference_peaks: np.ndarray,
+    order: int = 1,
+) -> Dict[str, Any]:
+    """Fit polynomial: reference = poly(measured). Returns correction callable.
+
+    Typical use: order=1 (linear shift+scale) or order=2 (mild nonlinearity).
+    Returns residual RMS and the coefficients (highest-order first).
+    """
+    measured_peaks = np.asarray(measured_peaks, dtype=float)
+    reference_peaks = np.asarray(reference_peaks, dtype=float)
+    if len(measured_peaks) != len(reference_peaks):
+        raise ValueError("Measured and reference peak arrays must have same length.")
+    if len(measured_peaks) < order + 1:
+        raise ValueError(f"Need at least {order + 1} matched peaks for order={order} fit.")
+
+    coeffs = np.polyfit(measured_peaks, reference_peaks, deg=order)
+    predicted = np.polyval(coeffs, measured_peaks)
+    residuals = reference_peaks - predicted
+    rms = float(np.sqrt(np.mean(residuals ** 2)))
+
+    return {
+        "coefficients": coeffs,
+        "order": order,
+        "residuals": residuals,
+        "rms": rms,
+        "measured": measured_peaks,
+        "reference": reference_peaks,
+    }
+
+
+def apply_calibration(x: np.ndarray, coefficients: np.ndarray) -> np.ndarray:
+    """Apply polynomial calibration to a Raman shift axis."""
+    return np.polyval(coefficients, np.asarray(x, dtype=float))
 
 
 def _process_worker(

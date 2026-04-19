@@ -77,5 +77,25 @@
         "order": 1,
         "window": 15,
         "polyorder": 3
+    },
+    "clustering": {
+        "default_linkage": "ward",
+        "default_metric": "euclidean",
+        "default_n_clusters": 3,
+        "umap_n_neighbors": 15,
+        "umap_min_dist": 0.1
+    },
+    "mcr_als": {
+        "n_components": 3,
+        "max_iter": 200,
+        "init": "nmf",
+        "nonneg_concentrations": true,
+        "nonneg_spectra": true,
+        "norm_spectra": false
+    },
+    "calibration": {
+        "default_standard": "silicon",
+        "default_order": 1,
+        "match_tolerance_cm": 15.0
     }
 }

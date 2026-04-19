@@ -17,6 +17,9 @@ from baseline_corrector_app import BaselineCorrectorWindow
 from pca_result_window import PCAResultWindow
 from nmf_result_window import NMFResultWindow
 from peak_analysis_window import PeakAnalysisWindow
+from clustering_window import ClusteringWindow
+from mcr_als_window import MCRALSWindow
+from calibration_window import CalibrationWindow
 
 logging.basicConfig(
     filename='app.log',
@@ -41,7 +44,7 @@ class CustomToolbar(NavigationToolbar2Tk):
 class RamanProcessorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Raman Spectroscopy Processor v2.2")
+        self.root.title("Raman Spectroscopy Processor v2.3")
         self.root.geometry("1280x820")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -275,6 +278,10 @@ class RamanProcessorApp:
             variable=self.apply_cosmic_ray,
             command=self._clear_and_redraw_raw,
         ).pack(anchor="w", padx=5)
+        ttk.Button(
+            preproc_frame, text="Wavelength Calibration...",
+            command=self._open_calibration,
+        ).pack(fill="x", pady=4, padx=5)
 
         # 3. Smooth
         smoothing_frame = ttk.LabelFrame(panel, text="3. Smooth (Savitzky-Golay)")
@@ -412,6 +419,12 @@ class RamanProcessorApp:
         rs_row.pack(fill="x", padx=5, pady=(2, 5))
         ttk.Label(rs_row, text="NMF Random State:").pack(side="left")
         ttk.Entry(rs_row, textvariable=self.nmf_random_state, width=6).pack(side="right")
+
+        ttk.Separator(batch_frame, orient="horizontal").pack(fill="x", pady=5)
+        ttk.Button(batch_frame, text="Clustering (HCA / K-means / UMAP)...",
+                   command=self._run_clustering).pack(fill="x", pady=2, padx=5)
+        ttk.Button(batch_frame, text="Run MCR-ALS...",
+                   command=self._run_mcr_als).pack(fill="x", pady=2, padx=5)
 
     def _build_plot_panel(self, parent) -> ttk.Frame:
         panel = ttk.Frame(parent)
@@ -1061,6 +1074,44 @@ class RamanProcessorApp:
         except Exception as e:
             messagebox.showerror("PCA Error", f"Failed to perform PCA.\nError: {e}")
             logging.error(f"PCA analysis failed: {e}")
+
+    def _run_clustering(self):
+        with self._batch_lock:
+            batch_df = self.batch_result_df
+        if batch_df is None:
+            messagebox.showwarning("No Data", "Please run Batch Process first.")
+            return
+        try:
+            ClusteringWindow(self.root, batch_df)
+        except Exception as e:
+            messagebox.showerror("Clustering Error", f"Failed: {e}")
+            logging.error(f"Clustering failed: {e}")
+
+    def _run_mcr_als(self):
+        with self._batch_lock:
+            batch_df = self.batch_result_df
+        if batch_df is None:
+            messagebox.showwarning("No Data", "Please run Batch Process first.")
+            return
+        try:
+            MCRALSWindow(self.root, batch_df)
+        except Exception as e:
+            messagebox.showerror("MCR-ALS Error", f"Failed: {e}")
+            logging.error(f"MCR-ALS failed: {e}")
+
+    def _open_calibration(self):
+        if self.processor.x is None:
+            messagebox.showwarning("Calibration", "Please import data first.")
+            return
+        CalibrationWindow(
+            self.root, self.processor,
+            on_applied=self._on_calibration_applied,
+        )
+
+    def _on_calibration_applied(self):
+        """Called after calibration — refresh the current view."""
+        self._clear_and_redraw_raw()
+        self._update_status("Calibration applied to Raman shift axis.")
 
     def _run_nmf_analysis(self):
         with self._batch_lock:
