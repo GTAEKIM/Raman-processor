@@ -85,6 +85,7 @@ class RamanProcessorApp:
         self.upper_bound = tk.DoubleVar(value=defaults.get("upper_bound", 3300.0))
         self.sg_poly_order = tk.IntVar(value=defaults.get("sg_poly_order", 1))
         self.sg_frame_window = tk.IntVar(value=defaults.get("sg_frame_window", 15))
+        self.apply_smoothing = tk.BooleanVar(value=defaults.get("apply_smoothing", True))
         self.baseline_params = defaults.get(
             "baseline",
             {"algorithm": "airpls", "params": {"lam": 1e6, "diff_order": 2}},
@@ -304,6 +305,11 @@ class RamanProcessorApp:
         # 3. Smooth
         smoothing_frame = ttk.LabelFrame(panel, text="3. Smooth (Savitzky-Golay)")
         smoothing_frame.pack(fill="x", pady=5, padx=2)
+        ttk.Checkbutton(
+            smoothing_frame,
+            text="Enable smoothing (uncheck to skip and run baseline on raw)",
+            variable=self.apply_smoothing,
+        ).pack(anchor="w", padx=5, pady=2)
         sg_param_frame = ttk.Frame(smoothing_frame)
         sg_param_frame.pack(fill="x", pady=5)
         ttk.Label(sg_param_frame, text="Order:").grid(row=0, column=0, sticky="w", padx=5)
@@ -655,6 +661,7 @@ class RamanProcessorApp:
             self.upper_bound.set(params['range']['upper_bound'])
             self.sg_poly_order.set(params['smoothing']['sg_poly_order'])
             self.sg_frame_window.set(params['smoothing']['sg_frame_window'])
+            self.apply_smoothing.set(params['smoothing'].get('enabled', True))
             self.baseline_params = params['baseline']
             self.baseline_algo_label.config(text=self._baseline_summary())
             if 'preprocessing' in params:
@@ -746,9 +753,19 @@ class RamanProcessorApp:
         )
 
     def _apply_baseline(self):
+        # If smoothing wasn't applied, use the raw (or cosmic-cleaned) spectrum
+        # as the baseline input. This lets the user skip the smoothing step.
         if self.y_mid is None:
-            messagebox.showwarning("Warning", "Please apply smoothing first.")
-            return
+            if self.current_selection_idx is None:
+                messagebox.showwarning("Warning", "Please select a spectrum first.")
+                return
+            self.y_raw = self.processor.y_raw[:, self.current_selection_idx]
+            current_y = self.y_raw.copy()
+            if self.apply_cosmic_ray.get():
+                current_y = self.processor.remove_cosmic_rays(current_y)
+            self.y_processed = current_y
+            self.y_mid = current_y.copy()
+            self._update_status("Smoothing skipped — running baseline on raw input.")
 
         algo = self.baseline_params['algorithm']
         params = self.baseline_params['params']
@@ -954,6 +971,7 @@ class RamanProcessorApp:
                 "upper_bound": self.upper_bound.get(),
             },
             "smoothing": {
+                "enabled": self.apply_smoothing.get(),
                 "sg_poly_order": self.sg_poly_order.get(),
                 "sg_frame_window": self.sg_frame_window.get(),
             },

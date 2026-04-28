@@ -140,9 +140,11 @@ python cli.py --help
 - 제거 강도는 Z-score threshold와 window로 조절 가능.
 
 ### 4.3 Smoothing (Savitzky-Golay)
+- **Enable smoothing** 체크박스로 켜고 끌 수 있습니다. 끄면 **smoothing을 건너뛰고 baseline correction을 raw(또는 cosmic-cleaned) 스펙트럼에 직접 적용**합니다.
 - **Polynomial order**: 보통 2~3.
 - **Window size** (홀수): 5, 11, 15, 21, ... (노이즈가 심하면 크게).
 - 실시간으로 플롯에 반영됩니다.
+- CLI: `--no-smoothing` 플래그로 동일하게 비활성화. 파라미터 JSON에서는 `"smoothing": {"enabled": false, ...}`.
 
 ### 4.4 Baseline Correction
 - 알고리즘 선택 (airPLS / arPLS / ALS / SNIP / ATQ / STQ / AH / SH / Morphological / 플러그인).

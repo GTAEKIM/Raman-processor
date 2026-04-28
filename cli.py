@@ -35,6 +35,7 @@ def _build_params(args) -> Dict[str, Any]:
     return {
         "range": {"lower_bound": args.range[0], "upper_bound": args.range[1]},
         "smoothing": {
+            "enabled": not args.no_smoothing,
             "sg_poly_order": args.sg_order,
             "sg_frame_window": args.sg_window,
         },
@@ -85,6 +86,8 @@ def main(argv=None):
                    metavar=("LOW", "HIGH"))
     p.add_argument("--sg-order", type=int, default=1)
     p.add_argument("--sg-window", type=int, default=15)
+    p.add_argument("--no-smoothing", action="store_true",
+                   help="Skip Savitzky-Golay smoothing (run baseline on raw input)")
     p.add_argument("--baseline", default="airpls",
                    choices=["airpls", "arpls", "asls", "snip",
                             "atq", "stq", "ah", "sh", "mor"])

@@ -851,11 +851,17 @@ class DataProcessor:
             threshold = params.get('preprocessing', {}).get('cosmic_ray_threshold', 5.0)
             y_current = self.remove_cosmic_rays(y_current, threshold=threshold)
 
-        y_mid = self.apply_sg_filter(
-            y_current,
-            int(params['smoothing']['sg_poly_order']),
-            int(params['smoothing']['sg_frame_window']),
-        )
+        # Smoothing is optional: skip if disabled or if the smoothing block is
+        # missing from the params dict.
+        smoothing_cfg = params.get('smoothing', {}) or {}
+        if smoothing_cfg.get('enabled', True):
+            y_mid = self.apply_sg_filter(
+                y_current,
+                int(smoothing_cfg.get('sg_poly_order', 1)),
+                int(smoothing_cfg.get('sg_frame_window', 15)),
+            )
+        else:
+            y_mid = y_current
 
         baseline_algo = params['baseline']['algorithm']
         baseline_params = params['baseline']['params']
