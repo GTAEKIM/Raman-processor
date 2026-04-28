@@ -624,6 +624,170 @@ class DataProcessor:
             "common_x": common_x,
         }
 
+    def append_data(
+        self,
+        filepaths: list[str],
+        prefix_with_filename: bool = True,
+        on_axis_mismatch: str = "interpolate",
+    ) -> Dict[str, Any]:
+        """Append spectra from one or more files onto the existing dataset.
+
+        Existing data is preserved; new spectra are interpolated onto the
+        current Raman-shift axis (`self.x_full`) and concatenated as new
+        columns.
+
+        Parameters
+        ----------
+        filepaths : list of str
+        prefix_with_filename : bool
+            Prefix new sample names with the file stem (default True).
+        on_axis_mismatch : {"interpolate", "intersect"}
+            "interpolate" — np.interp every new spectrum onto the existing
+            grid (values outside the new file's native range are clipped
+            to the file's edges).
+            "intersect" — restrict the entire dataset to the overlapping
+            range and resample everything (existing + new) onto a fresh
+            common grid.
+
+        Returns
+        -------
+        dict — n_added, n_failed, failures, total_spectra
+        """
+        if self.x_full is None or self.y_raw_full is None:
+            # No existing data — fall back to a plain multi-load.
+            res = self.load_data_multi(filepaths, merge="intersection",
+                                       prefix_with_filename=prefix_with_filename)
+            return {
+                "n_added": res["n_spectra"],
+                "n_failed": res["n_failed"],
+                "failures": res["failures"],
+                "total_spectra": res["n_spectra"],
+            }
+
+        per_file: list[Tuple[str, np.ndarray, np.ndarray, list[str]]] = []
+        failures: list[Tuple[str, str]] = []
+        for fp in filepaths:
+            try:
+                ext = os.path.splitext(fp)[1].lower()
+                if ext == ".csv":
+                    df_raw = pd.read_csv(fp, header=None)
+                elif ext in (".xlsx", ".xls"):
+                    df_raw = pd.read_excel(fp, header=None)
+                elif ext in (".txt", ".asc", ".dat"):
+                    df_raw = _load_text_file(fp)
+                else:
+                    raise ValueError(f"Unsupported file format: {ext}")
+                if df_raw.shape[0] < 2 or df_raw.shape[1] < 2:
+                    raise ValueError("Need ≥2 rows and ≥2 columns.")
+                x = df_raw.iloc[0, 1:].values.astype(float)
+                y = df_raw.iloc[1:, 1:].values.astype(float).T
+                names = [str(n) for n in df_raw.iloc[1:, 0].tolist()]
+                order = np.argsort(x)
+                x = x[order]; y = y[order, :]
+                if prefix_with_filename:
+                    stem = os.path.splitext(os.path.basename(fp))[0]
+                    names = [f"{stem}::{n}" for n in names]
+                per_file.append((fp, x, y, names))
+            except Exception as e:
+                logging.error(f"Failed to load {fp}: {e}")
+                failures.append((fp, str(e)))
+
+        if not per_file:
+            raise ValueError(
+                f"All {len(filepaths)} file(s) failed to load. "
+                f"First error: {failures[0][1] if failures else 'unknown'}"
+            )
+
+        if on_axis_mismatch == "intersect":
+            # Re-merge everything (existing + new) onto a fresh intersection grid.
+            lo = max(self.x_full.min(), max(x.min() for _, x, _, _ in per_file))
+            hi = min(self.x_full.max(), min(x.max() for _, x, _, _ in per_file))
+            if lo >= hi:
+                raise ValueError("No overlapping range between existing data and new files.")
+            steps = [np.median(np.diff(self.x_full))] + [
+                np.median(np.diff(x)) for _, x, _, _ in per_file if x.size > 1
+            ]
+            step = float(min(steps))
+            n_pts = max(2, min(int(np.floor((hi - lo) / step)) + 1, 20000))
+            new_x = np.linspace(lo, hi, n_pts)
+
+            existing_y = np.column_stack([
+                np.interp(new_x, self.x_full, self.y_raw_full[:, c])
+                for c in range(self.y_raw_full.shape[1])
+            ])
+            new_cols = []
+            new_names = []
+            for _, x, y, names in per_file:
+                for col in range(y.shape[1]):
+                    new_cols.append(np.interp(new_x, x, y[:, col]))
+                new_names.extend(names)
+            added_y = np.column_stack(new_cols)
+            self.x_full = new_x
+            self.y_raw_full = np.column_stack([existing_y, added_y])
+            self.sample_names = list(self.sample_names) + new_names
+        else:
+            # Interpolate new spectra onto the existing axis.
+            new_cols = []
+            new_names = []
+            for _, x, y, names in per_file:
+                for col in range(y.shape[1]):
+                    new_cols.append(np.interp(self.x_full, x, y[:, col]))
+                new_names.extend(names)
+            added_y = np.column_stack(new_cols)
+            self.y_raw_full = np.column_stack([self.y_raw_full, added_y])
+            self.sample_names = list(self.sample_names) + new_names
+
+        # Disambiguate any duplicate names introduced by appending.
+        seen: Dict[str, int] = {}
+        deduped: list[str] = []
+        for n in self.sample_names:
+            if n in seen:
+                seen[n] += 1
+                deduped.append(f"{n}#{seen[n]}")
+            else:
+                seen[n] = 0
+                deduped.append(n)
+        self.sample_names = deduped
+
+        # Refresh the working (range-filtered) views to match the new full data.
+        self.x = self.x_full.copy()
+        self.y_raw = self.y_raw_full.copy()
+
+        n_added = sum(y.shape[1] for _, _, y, _ in per_file)
+        logging.info(
+            f"Appended {n_added} spectra from {len(per_file)} file(s); "
+            f"total now {self.y_raw_full.shape[1]}, failed={len(failures)}"
+        )
+        return {
+            "n_added": n_added,
+            "n_failed": len(failures),
+            "failures": failures,
+            "total_spectra": int(self.y_raw_full.shape[1]),
+        }
+
+    def remove_spectra(self, indices: list[int]) -> int:
+        """Remove spectra at the given column indices. Returns count removed."""
+        if self.y_raw_full is None or not indices:
+            return 0
+        idx = sorted({i for i in indices if 0 <= i < self.y_raw_full.shape[1]})
+        if not idx:
+            return 0
+        keep = [i for i in range(self.y_raw_full.shape[1]) if i not in set(idx)]
+        self.y_raw_full = self.y_raw_full[:, keep]
+        self.sample_names = [self.sample_names[i] for i in keep]
+        if self.y_raw is not None and self.y_raw.shape[1] == len(keep) + len(idx):
+            self.y_raw = self.y_raw[:, keep]
+        else:
+            self.y_raw = self.y_raw_full.copy() if self.y_raw_full.size else None
+        if self.y_raw_full.size == 0:
+            self.x_full = None
+            self.x = None
+            self.y_raw_full = None
+            self.y_raw = None
+            self.sample_names = []
+        logging.info(f"Removed {len(idx)} spectra; {len(keep)} remain.")
+        return len(idx)
+
     def recalibrate_axis(self, coefficients: np.ndarray) -> None:
         """Apply a polynomial calibration to both x_full and x in-place."""
         if self.x_full is None:

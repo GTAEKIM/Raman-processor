@@ -126,14 +126,25 @@ python cli.py --help
 
 ### 4.1 Data Load
 - **[Import Data]** 버튼으로 파일 선택.
-- **여러 파일을 한 번에 선택 가능** (Ctrl/Shift 클릭). 2개 이상이면 다음을 묻습니다:
+- **여러 파일을 한 번에 선택 가능** (Ctrl/Shift 클릭). 2개 이상이면 다음을 묻습니다 (첫 import 시):
   - **Yes — Intersection (교집합, 권장)**: 모든 파일이 공통으로 가지는 Raman-shift 영역만 사용. 외삽 없음.
   - **No — Union (합집합)**: 가장 넓은 영역 사용. 각 파일의 범위 밖은 가장자리 값으로 채워짐.
 - 모든 파일은 가장 조밀한 샘플링을 기준으로 공통 축에 자동 보간됩니다.
-- 샘플명은 `<파일명>::<원본샘플명>` 형식으로 prefix가 붙어 출처를 보존합니다.
+- 샘플명은 `<파일명>::<원본샘플명>` 형식으로 prefix가 붙어 출처를 보존합니다. 중복 시 `#1, #2`로 자동 disambiguate.
 - 일부 파일이 실패해도 나머지는 정상 로드되고, 실패 파일 목록이 경고창으로 표시됩니다.
-- 샘플 리스트에서 처리할 스펙트럼을 선택.
-- **Raman shift range**에 lower / upper bound 입력 후 **Apply Range**.
+
+#### 누적 Import (Append)
+- **이미 데이터가 로드된 상태에서 다시 [Import Data]를 누르면 기존 데이터는 보존되고 새 파일이 끝에 추가됩니다.**
+- 새 파일들은 **현재 Raman-shift 축에 자동 보간**되어 추가됩니다.
+- 정보 패널에 누적 스펙트럼 수가 표시됩니다.
+
+#### 데이터 삭제
+- 샘플 리스트에서 **Ctrl/Shift 클릭으로 여러 항목 선택** 가능 (extended selection).
+- **[Remove Selected]** 버튼으로 선택한 스펙트럼만 데이터셋에서 제거.
+- **[Clear All]** 버튼으로 전체 초기화 (확인 대화상자 표시).
+- 원본 파일은 절대 삭제되지 않습니다 — 메모리상의 데이터셋만 변경됩니다.
+
+샘플 리스트에서 처리할 스펙트럼을 선택한 뒤, **Raman shift range**에 lower / upper bound 입력 후 **Apply Range**.
 
 ### 4.2 Pre-processing
 - **Cosmic ray removal**: 체크 시 MAD 기반 스파이크를 제거.

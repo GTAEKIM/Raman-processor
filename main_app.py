@@ -275,9 +275,17 @@ class RamanProcessorApp:
         file_frame.pack(fill="x", pady=5, padx=2)
         self.info_label = ttk.Label(file_frame, text="No file loaded.", wraplength=250)
         self.info_label.pack(padx=5, pady=5)
-        self.listbox = tk.Listbox(file_frame, height=8)
+        self.listbox = tk.Listbox(file_frame, height=8, selectmode=tk.EXTENDED)
         self.listbox.pack(fill="x", expand=True, padx=5, pady=5)
         self.listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
+        btn_row = ttk.Frame(file_frame)
+        btn_row.pack(fill="x", padx=5, pady=2)
+        ttk.Button(btn_row, text="Remove Selected",
+                   command=self._remove_selected_spectra).pack(
+            side="left", expand=True, fill="x", padx=2)
+        ttk.Button(btn_row, text="Clear All",
+                   command=self._clear_all_spectra).pack(
+            side="left", expand=True, fill="x", padx=2)
 
         # 2. Pre-process
         preproc_frame = ttk.LabelFrame(panel, text="2. Pre-process")
@@ -582,8 +590,39 @@ class RamanProcessorApp:
             return
         filepaths = list(filepaths)
 
+        has_existing = (
+            self.processor.x_full is not None
+            and self.processor.y_raw_full is not None
+            and self.processor.y_raw_full.shape[1] > 0
+        )
+
         try:
-            if len(filepaths) == 1:
+            if has_existing:
+                # APPEND to existing dataset (do not delete previously imported data)
+                result = self.processor.append_data(
+                    filepaths, prefix_with_filename=True,
+                    on_axis_mismatch="interpolate",
+                )
+                info_text = (
+                    f"Files (cumulative)\n"
+                    f"Spectra: {result['total_spectra']}  "
+                    f"(+{result['n_added']} new, {result['n_failed']} failed)"
+                )
+                status_msg = (
+                    f"Appended {result['n_added']} spectra "
+                    f"(total now {result['total_spectra']}); failed={result['n_failed']}"
+                )
+                if result["failures"]:
+                    fail_lines = "\n".join(
+                        f"  • {os.path.basename(p)}: {e}"
+                        for p, e in result["failures"][:10]
+                    )
+                    messagebox.showwarning(
+                        "Some files failed",
+                        f"{result['n_failed']} of {len(filepaths)} file(s) "
+                        f"could not be loaded:\n\n{fail_lines}",
+                    )
+            elif len(filepaths) == 1:
                 num_spectra = self.processor.load_data(filepaths[0])
                 info_text = (
                     f"File: {os.path.basename(filepaths[0])}\nSpectra: {num_spectra}"
@@ -592,11 +631,10 @@ class RamanProcessorApp:
                     f"Loaded {num_spectra} spectra from {os.path.basename(filepaths[0])}"
                 )
             else:
-                # Ask user how to merge axes
+                # No existing data, multiple files — merge with chosen axis policy
                 merge_mode = "intersection"
                 try:
-                    from tkinter import messagebox as _mb
-                    use_intersection = _mb.askyesno(
+                    use_intersection = messagebox.askyesno(
                         "Merge axes",
                         f"Selected {len(filepaths)} files.\n\n"
                         "Use INTERSECTION of Raman-shift ranges?\n"
@@ -610,14 +648,13 @@ class RamanProcessorApp:
                 result = self.processor.load_data_multi(
                     filepaths, merge=merge_mode, prefix_with_filename=True
                 )
-                num_spectra = result["n_spectra"]
                 info_text = (
                     f"Files: {result['n_files']}  ({result['n_failed']} failed)\n"
-                    f"Spectra: {num_spectra}  ·  merge={merge_mode}"
+                    f"Spectra: {result['n_spectra']}  ·  merge={merge_mode}"
                 )
                 status_msg = (
-                    f"Loaded {num_spectra} spectra from {result['n_files']} file(s); "
-                    f"failed={result['n_failed']}"
+                    f"Loaded {result['n_spectra']} spectra from "
+                    f"{result['n_files']} file(s); failed={result['n_failed']}"
                 )
                 if result["failures"]:
                     fail_lines = "\n".join(
@@ -630,20 +667,88 @@ class RamanProcessorApp:
                         f"could not be loaded:\n\n{fail_lines}",
                     )
 
+            self._refresh_listbox_after_import()
             self.info_label.config(text=info_text)
-            self.listbox.delete(0, tk.END)
-            with self._batch_lock:
-                self.batch_result_df = None
-            for name in self.processor.sample_names:
-                self.listbox.insert(tk.END, name)
-            if num_spectra > 0:
-                self.listbox.selection_set(0)
-                self.current_selection_idx = 0
-                self._apply_range_filter()
             self._update_status(status_msg)
         except Exception as e:
             messagebox.showerror("Import Error", str(e))
             self._update_status("Import failed.")
+
+    def _refresh_listbox_after_import(self):
+        """Repopulate the listbox from processor.sample_names and select the
+        first unselected row. Invalidates cached batch results."""
+        self.listbox.delete(0, tk.END)
+        with self._batch_lock:
+            self.batch_result_df = None
+        for name in self.processor.sample_names:
+            self.listbox.insert(tk.END, name)
+        n = self.listbox.size()
+        if n > 0:
+            idx = self.current_selection_idx if (
+                self.current_selection_idx is not None
+                and self.current_selection_idx < n
+            ) else 0
+            self.listbox.selection_clear(0, tk.END)
+            self.listbox.selection_set(idx)
+            self.listbox.see(idx)
+            self.current_selection_idx = idx
+            self._apply_range_filter()
+        else:
+            self.current_selection_idx = None
+
+    def _remove_selected_spectra(self):
+        sel = list(self.listbox.curselection())
+        if not sel:
+            messagebox.showinfo(
+                "Remove", "Select one or more spectra to remove (Ctrl/Shift click)."
+            )
+            return
+        if not messagebox.askyesno(
+            "Confirm Removal",
+            f"Remove {len(sel)} spectrum(a) from the dataset?\n"
+            "This does not delete any source files."
+        ):
+            return
+        n_removed = self.processor.remove_spectra(sel)
+        # Reset transient processing state since indices have shifted
+        self.y_raw = self.y_mid = self.baseline = self.y_final = self.y_processed = None
+        if self.processor.y_raw_full is None:
+            # Everything cleared
+            self.listbox.delete(0, tk.END)
+            self.current_selection_idx = None
+            self.info_label.config(text="No file loaded.")
+            with self._batch_lock:
+                self.batch_result_df = None
+            self._update_status(f"Removed {n_removed} spectra. Dataset is empty.")
+            self.ax.clear(); self.canvas.draw()
+            return
+        # Pick a sensible new selection: clamp to remaining range.
+        remaining = self.processor.y_raw_full.shape[1]
+        new_idx = min(sel[0], remaining - 1)
+        self.current_selection_idx = new_idx
+        self._refresh_listbox_after_import()
+        self.info_label.config(
+            text=f"Spectra: {remaining} (after removing {n_removed})"
+        )
+        self._update_status(f"Removed {n_removed} spectra; {remaining} remain.")
+
+    def _clear_all_spectra(self):
+        if self.processor.y_raw_full is None or self.processor.y_raw_full.shape[1] == 0:
+            return
+        if not messagebox.askyesno(
+            "Confirm Clear", "Remove ALL imported spectra?"
+        ):
+            return
+        n = self.processor.y_raw_full.shape[1]
+        self.processor.remove_spectra(list(range(n)))
+        self.y_raw = self.y_mid = self.baseline = self.y_final = self.y_processed = None
+        self.listbox.delete(0, tk.END)
+        self.current_selection_idx = None
+        self.info_label.config(text="No file loaded.")
+        with self._batch_lock:
+            self.batch_result_df = None
+        self.ax.clear(); self.canvas.draw()
+        self._update_status(f"Cleared all {n} spectra.")
 
     def _import_params(self):
         filepath = filedialog.askopenfilename(
