@@ -562,23 +562,69 @@ class RamanProcessorApp:
     # ── Data Import ─────────────────────────────────────────────────────
 
     def _import_data(self):
-        filepath = filedialog.askopenfilename(
+        filepaths = filedialog.askopenfilenames(
+            title="Select one or more data files",
             filetypes=[
                 ("All supported", "*.xlsx *.xls *.csv *.txt *.asc *.dat"),
                 ("Excel", "*.xlsx *.xls"),
                 ("CSV", "*.csv"),
                 ("Text / ASCII", "*.txt *.asc *.dat"),
                 ("All files", "*.*"),
-            ]
+            ],
         )
-        if not filepath:
+        if not filepaths:
             return
+        filepaths = list(filepaths)
 
         try:
-            num_spectra = self.processor.load_data(filepath)
-            self.info_label.config(
-                text=f"File: {os.path.basename(filepath)}\nSpectra: {num_spectra}"
-            )
+            if len(filepaths) == 1:
+                num_spectra = self.processor.load_data(filepaths[0])
+                info_text = (
+                    f"File: {os.path.basename(filepaths[0])}\nSpectra: {num_spectra}"
+                )
+                status_msg = (
+                    f"Loaded {num_spectra} spectra from {os.path.basename(filepaths[0])}"
+                )
+            else:
+                # Ask user how to merge axes
+                merge_mode = "intersection"
+                try:
+                    from tkinter import messagebox as _mb
+                    use_intersection = _mb.askyesno(
+                        "Merge axes",
+                        f"Selected {len(filepaths)} files.\n\n"
+                        "Use INTERSECTION of Raman-shift ranges?\n"
+                        "  • Yes → keep only overlapping range (recommended)\n"
+                        "  • No  → use UNION (edges padded with NaN→edge-fill)",
+                    )
+                    merge_mode = "intersection" if use_intersection else "union"
+                except Exception:
+                    pass
+
+                result = self.processor.load_data_multi(
+                    filepaths, merge=merge_mode, prefix_with_filename=True
+                )
+                num_spectra = result["n_spectra"]
+                info_text = (
+                    f"Files: {result['n_files']}  ({result['n_failed']} failed)\n"
+                    f"Spectra: {num_spectra}  ·  merge={merge_mode}"
+                )
+                status_msg = (
+                    f"Loaded {num_spectra} spectra from {result['n_files']} file(s); "
+                    f"failed={result['n_failed']}"
+                )
+                if result["failures"]:
+                    fail_lines = "\n".join(
+                        f"  • {os.path.basename(p)}: {e}"
+                        for p, e in result["failures"][:10]
+                    )
+                    messagebox.showwarning(
+                        "Some files failed",
+                        f"{result['n_failed']} of {len(filepaths)} file(s) "
+                        f"could not be loaded:\n\n{fail_lines}",
+                    )
+
+            self.info_label.config(text=info_text)
             self.listbox.delete(0, tk.END)
             with self._batch_lock:
                 self.batch_result_df = None
@@ -588,7 +634,7 @@ class RamanProcessorApp:
                 self.listbox.selection_set(0)
                 self.current_selection_idx = 0
                 self._apply_range_filter()
-            self._update_status(f"Loaded {num_spectra} spectra from {os.path.basename(filepath)}")
+            self._update_status(status_msg)
         except Exception as e:
             messagebox.showerror("Import Error", str(e))
             self._update_status("Import failed.")

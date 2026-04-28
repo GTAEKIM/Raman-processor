@@ -471,6 +471,159 @@ class DataProcessor:
         logging.info(f"Loaded {num_spectra} spectra from {filepath}")
         return num_spectra
 
+    def load_data_multi(
+        self,
+        filepaths: list[str],
+        merge: str = "intersection",
+        prefix_with_filename: bool = True,
+    ) -> Dict[str, Any]:
+        """Load multiple files and merge into a single (x, y_raw, sample_names) set.
+
+        Each file is parsed into the standard wide-table format. All spectra
+        are then resampled onto a common Raman-shift axis via linear
+        interpolation.
+
+        Parameters
+        ----------
+        filepaths : list of str
+            Files to load (xlsx/csv/txt/asc/dat). Order is preserved.
+        merge : {"intersection", "union"}
+            Common-axis strategy. "intersection" uses the overlapping range
+            across all files (recommended — no extrapolation). "union" uses
+            the full span; gaps outside a file's native range are filled
+            with NaN, then forward/back-filled at the edges.
+        prefix_with_filename : bool
+            If True (default), every sample name is prefixed with the file
+            stem (e.g. "sample_a.csv::Spectrum1") to avoid collisions and
+            preserve provenance.
+
+        Returns
+        -------
+        dict with keys:
+            n_files     : int — files successfully parsed
+            n_spectra   : int — total spectra after merging
+            n_failed    : int — files that failed to load
+            failures    : list[(path, error_msg)]
+            common_x    : np.ndarray — merged Raman-shift grid
+        """
+        if not filepaths:
+            raise ValueError("No files supplied.")
+        if merge not in ("intersection", "union"):
+            raise ValueError(f"Unknown merge mode: {merge}")
+
+        per_file: list[Tuple[str, np.ndarray, np.ndarray, list[str]]] = []
+        failures: list[Tuple[str, str]] = []
+
+        for fp in filepaths:
+            try:
+                ext = os.path.splitext(fp)[1].lower()
+                if ext == ".csv":
+                    df_raw = pd.read_csv(fp, header=None)
+                elif ext in (".xlsx", ".xls"):
+                    df_raw = pd.read_excel(fp, header=None)
+                elif ext in (".txt", ".asc", ".dat"):
+                    df_raw = _load_text_file(fp)
+                else:
+                    raise ValueError(f"Unsupported file format: {ext}")
+
+                if df_raw.shape[0] < 2 or df_raw.shape[1] < 2:
+                    raise ValueError("Need ≥2 rows and ≥2 columns.")
+
+                x = df_raw.iloc[0, 1:].values.astype(float)
+                y = df_raw.iloc[1:, 1:].values.astype(float).T  # shape (n_x, n_samples)
+                names = [str(n) for n in df_raw.iloc[1:, 0].tolist()]
+
+                # Sort by x ascending for safe interpolation
+                order = np.argsort(x)
+                x = x[order]
+                y = y[order, :]
+
+                if prefix_with_filename:
+                    stem = os.path.splitext(os.path.basename(fp))[0]
+                    names = [f"{stem}::{n}" for n in names]
+
+                per_file.append((fp, x, y, names))
+            except Exception as e:
+                logging.error(f"Failed to load {fp}: {e}")
+                failures.append((fp, str(e)))
+
+        if not per_file:
+            raise ValueError(
+                f"All {len(filepaths)} files failed to load. First error: "
+                f"{failures[0][1] if failures else 'unknown'}"
+            )
+
+        # Build common Raman-shift axis
+        if merge == "intersection":
+            lo = max(x.min() for _, x, _, _ in per_file)
+            hi = min(x.max() for _, x, _, _ in per_file)
+            if lo >= hi:
+                raise ValueError(
+                    "Files have no overlapping Raman-shift range. "
+                    "Try merge='union' or check axis units."
+                )
+        else:  # union
+            lo = min(x.min() for _, x, _, _ in per_file)
+            hi = max(x.max() for _, x, _, _ in per_file)
+
+        # Use the densest (smallest step) sampling among files, restricted to [lo, hi]
+        steps = [np.median(np.diff(x)) for _, x, _, _ in per_file if x.size > 1]
+        step = float(min(steps)) if steps else 1.0
+        n_pts = int(np.floor((hi - lo) / step)) + 1
+        n_pts = max(2, min(n_pts, 20000))
+        common_x = np.linspace(lo, hi, n_pts)
+
+        # Interpolate every spectrum onto common_x
+        all_y_cols: list[np.ndarray] = []
+        all_names: list[str] = []
+        for _, x, y, names in per_file:
+            for col in range(y.shape[1]):
+                spec = y[:, col]
+                if merge == "union":
+                    interp = np.interp(common_x, x, spec, left=np.nan, right=np.nan)
+                    # Edge-fill NaNs so downstream processing doesn't break
+                    if np.isnan(interp).any():
+                        finite = np.where(~np.isnan(interp))[0]
+                        if finite.size:
+                            interp[: finite[0]] = interp[finite[0]]
+                            interp[finite[-1] + 1 :] = interp[finite[-1]]
+                else:
+                    interp = np.interp(common_x, x, spec)
+                all_y_cols.append(interp)
+            all_names.extend(names)
+
+        y_merged = np.column_stack(all_y_cols)
+
+        # Disambiguate any duplicate names
+        seen: Dict[str, int] = {}
+        deduped: list[str] = []
+        for n in all_names:
+            if n in seen:
+                seen[n] += 1
+                deduped.append(f"{n}#{seen[n]}")
+            else:
+                seen[n] = 0
+                deduped.append(n)
+
+        self.x_full = common_x.copy()
+        self.y_raw_full = y_merged.copy()
+        self.x = self.x_full.copy()
+        self.y_raw = self.y_raw_full.copy()
+        self.sample_names = deduped
+
+        logging.info(
+            f"Multi-load: {len(per_file)} file(s) merged → {y_merged.shape[1]} spectra, "
+            f"{n_pts} shift points, mode={merge}, failed={len(failures)}"
+        )
+
+        return {
+            "n_files": len(per_file),
+            "n_spectra": y_merged.shape[1],
+            "n_failed": len(failures),
+            "failures": failures,
+            "common_x": common_x,
+        }
+
     def recalibrate_axis(self, coefficients: np.ndarray) -> None:
         """Apply a polynomial calibration to both x_full and x in-place."""
         if self.x_full is None:
