@@ -406,6 +406,10 @@ class RamanProcessorApp:
         ttk.Button(
             export_frame, text="Export Final Data...", command=self._export_final_data
         ).pack(fill="x", pady=2, padx=5)
+        ttk.Button(
+            export_frame, text="Export All Stages (Raw/Smooth/Baseline/Final)...",
+            command=self._export_all_stages,
+        ).pack(fill="x", pady=2, padx=5)
 
         # 7. Batch
         batch_frame = ttk.LabelFrame(panel, text="7. Batch & Multi-spectrum Analysis")
@@ -1271,6 +1275,153 @@ class RamanProcessorApp:
             {'Raman shift (cm-1)': self.processor.x, name: self.y_final},
             f"Final_{name}",
         )
+
+    def _export_all_stages(self):
+        """Export Raw / Smooth / Baseline / Final stages to a single .xlsx
+        with one sheet per stage.
+
+        Scope:
+        - If batch results are available, every spectrum is processed
+          through the current pipeline and all four stages are written
+          (one column per spectrum on each sheet).
+        - Otherwise, only the currently-selected spectrum is exported,
+          using the in-memory y_raw / y_mid / baseline / y_final arrays.
+        """
+        if self.processor.x is None or self.processor.y_raw is None:
+            messagebox.showwarning("Warning", "Please import data first.")
+            return
+
+        # Decide scope: full dataset (batch-style) or current selection
+        n_spectra = self.processor.y_raw.shape[1]
+        export_all = False
+        if n_spectra > 1:
+            choice = messagebox.askyesnocancel(
+                "Export All Stages",
+                f"Export all {n_spectra} spectra (Yes) or only the current "
+                f"selection (No)?\n\nCancel aborts the export.",
+            )
+            if choice is None:
+                return
+            export_all = bool(choice)
+
+        # Validate inputs for single-selection mode
+        if not export_all:
+            if self.current_selection_idx is None:
+                messagebox.showwarning("Warning", "Please select a spectrum.")
+                return
+            if self.y_raw is None or self.y_mid is None or self.baseline is None or self.y_final is None:
+                messagebox.showwarning(
+                    "Warning",
+                    "Run smoothing and baseline correction first so all four "
+                    "stages exist.",
+                )
+                return
+
+        filepath = filedialog.asksaveasfilename(
+            title="Save All Stages As",
+            defaultextension=".xlsx",
+            initialfile="AllStages_batch.xlsx" if export_all else f"AllStages_{self.processor.sample_names[self.current_selection_idx]}.xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+        )
+        if not filepath:
+            return
+
+        x = self.processor.x
+        params = self._collect_current_params()
+
+        try:
+            if export_all:
+                # Process every spectrum through the current pipeline,
+                # capturing intermediate stages.
+                raw_cols, smooth_cols, base_cols, final_cols = {}, {}, {}, {}
+                use_smoothing = bool(params.get("smoothing", {}).get("enabled", True))
+                cosmic = bool(params.get("preprocessing", {}).get("apply_cosmic_ray", False))
+                cosmic_thresh = float(
+                    params.get("preprocessing", {}).get("cosmic_ray_threshold", 5.0)
+                )
+                algo = params["baseline"]["algorithm"]
+                bparams = params["baseline"]["params"]
+                norm = params.get("normalization", "none")
+                deriv_cfg = params.get("derivative", {}) or {}
+
+                for i in range(n_spectra):
+                    name = self.processor.sample_names[i]
+                    y_raw = self.processor.y_raw[:, i].copy()
+                    raw_cols[name] = y_raw
+
+                    y_pre = (self.processor.remove_cosmic_rays(y_raw, threshold=cosmic_thresh)
+                             if cosmic else y_raw.copy())
+                    if use_smoothing:
+                        y_mid = self.processor.apply_sg_filter(
+                            y_pre,
+                            int(params["smoothing"]["sg_poly_order"]),
+                            int(params["smoothing"]["sg_frame_window"]),
+                        )
+                    else:
+                        y_mid = y_pre
+                    smooth_cols[name] = y_mid
+
+                    try:
+                        baseline = self.processor.compute_baseline(y_mid, algo, bparams)
+                    except Exception:
+                        baseline = np.zeros_like(y_mid)
+                    base_cols[name] = baseline
+
+                    y_final = y_mid - baseline
+                    if isinstance(deriv_cfg, dict) and deriv_cfg.get("enabled", False):
+                        try:
+                            y_final = compute_derivative(
+                                y_final,
+                                order=int(deriv_cfg.get("order", 1)),
+                                window=int(deriv_cfg.get("window", 15)),
+                                polyorder=int(deriv_cfg.get("polyorder", 3)),
+                            )
+                        except Exception:
+                            pass
+                    if norm and norm != "none":
+                        try:
+                            y_final = normalize_spectrum(y_final, method=norm)
+                        except Exception:
+                            pass
+                    final_cols[name] = y_final
+
+                stage_dfs = {
+                    "Raw": pd.DataFrame(raw_cols, index=x),
+                    "Smoothed": pd.DataFrame(smooth_cols, index=x),
+                    "Baseline": pd.DataFrame(base_cols, index=x),
+                    "Final": pd.DataFrame(final_cols, index=x),
+                }
+            else:
+                # Current selection only
+                idx = self.current_selection_idx
+                name = self.processor.sample_names[idx]
+                stage_dfs = {
+                    "Raw":      pd.DataFrame({name: self.y_raw}, index=x),
+                    "Smoothed": pd.DataFrame({name: self.y_mid}, index=x),
+                    "Baseline": pd.DataFrame({name: self.baseline}, index=x),
+                    "Final":    pd.DataFrame({name: self.y_final}, index=x),
+                }
+
+            with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
+                for sheet, df in stage_dfs.items():
+                    df.index.name = "Raman shift (cm-1)"
+                    # Transpose so each row is a spectrum and columns are
+                    # shifts — matches the layout of "Export Final Data".
+                    df.T.to_excel(writer, sheet_name=sheet, header=True, index=True)
+
+            json_filepath = os.path.splitext(filepath)[0] + ".json"
+            with open(json_filepath, "w", encoding="utf-8") as f:
+                json.dump(params, f, indent=4)
+
+            scope = f"all {n_spectra} spectra" if export_all else "current selection"
+            messagebox.showinfo(
+                "Success",
+                f"Exported {scope} (Raw/Smoothed/Baseline/Final) to\n{filepath}\n\n"
+                f"Parameters saved to {os.path.basename(json_filepath)}",
+            )
+            self._update_status(f"All-stages export complete ({scope}).")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Could not save file.\nError: {e}")
 
     # ── Batch Processing ────────────────────────────────────────────────
 

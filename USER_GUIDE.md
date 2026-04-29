@@ -181,7 +181,15 @@ python cli.py --help
 - 1차 또는 2차 도함수 (SG 기반) 계산. 오버래핑된 피크를 분리할 때 유용.
 
 ### 4.7 Export
-- **[Export Data]**: xlsx/csv로 저장. 파라미터 JSON이 동일 경로에 함께 저장됩니다.
+- **[Export Smoothed Data...]**: 현재 선택된 스펙트럼의 smoothed 결과를 xlsx/csv로.
+- **[Export Final Data...]**: 현재 선택된 스펙트럼의 최종(baseline-corrected ± normalize/derivative) 결과를.
+- **[Export All Stages (Raw/Smooth/Baseline/Final)...]**:
+  - 한 번에 4단계 스펙트럼을 **각각 별도의 시트**로 저장한 단일 xlsx 파일.
+  - 시트 구성: `Raw`, `Smoothed`, `Baseline`, `Final`.
+  - 다중 스펙트럼이 import된 경우, **현재 선택만** 또는 **전체 데이터셋**을 묻습니다.
+    - 전체 모드: 모든 스펙트럼을 현재 파이프라인 파라미터로 처리해 각 시트에 한 행씩 기록.
+    - 선택 모드: 메인 창에 표시된 스펙트럼만 (smoothing & baseline 적용 후) 기록.
+  - 파라미터 JSON이 동일 경로에 함께 저장되어 재현 가능.
 
 ---
 
