@@ -55,6 +55,11 @@ class RamanProcessorApp:
         self.processor = DataProcessor()
         self.config = self._load_config()
 
+        # Global Ctrl+Z / Cmd+Z for undo
+        self.root.bind_all("<Control-z>", self._undo)
+        self.root.bind_all("<Control-Z>", self._undo)
+        self.root.bind_all("<Command-z>", self._undo)
+
         # Auto-load baseline plugins from ./plugins
         try:
             plugin_dir = resource_path("plugins")
@@ -78,6 +83,11 @@ class RamanProcessorApp:
         self.batch_result_df: Optional[pd.DataFrame] = None
         self._batch_lock = threading.Lock()
         self.last_processing_stage = ProcessingStage.RAW
+
+        # Undo stack — snapshots of dataset state before destructive ops.
+        # Capped to avoid unbounded memory growth on large datasets.
+        self.undo_stack: list[dict] = []
+        self.UNDO_LIMIT = 20
 
         # UI variables from config defaults
         defaults = self.config.get("defaults", {})
@@ -286,6 +296,12 @@ class RamanProcessorApp:
         ttk.Button(btn_row, text="Clear All",
                    command=self._clear_all_spectra).pack(
             side="left", expand=True, fill="x", padx=2)
+        undo_row = ttk.Frame(file_frame)
+        undo_row.pack(fill="x", padx=5, pady=2)
+        self.undo_button = ttk.Button(
+            undo_row, text="Undo", command=self._undo, state="disabled"
+        )
+        self.undo_button.pack(fill="x", padx=2)
 
         # 2. Pre-process
         preproc_frame = ttk.LabelFrame(panel, text="2. Pre-process")
@@ -595,6 +611,7 @@ class RamanProcessorApp:
             and self.processor.y_raw_full is not None
             and self.processor.y_raw_full.shape[1] > 0
         )
+        self._push_undo("Import" if not has_existing else "Append import")
 
         try:
             if has_existing:
@@ -674,6 +691,80 @@ class RamanProcessorApp:
             messagebox.showerror("Import Error", str(e))
             self._update_status("Import failed.")
 
+    # ── Undo stack ──────────────────────────────────────────────────────
+
+    def _push_undo(self, label: str) -> None:
+        """Snapshot the dataset state before a destructive operation."""
+        p = self.processor
+        snap = {
+            "label": label,
+            "x_full": None if p.x_full is None else p.x_full.copy(),
+            "y_raw_full": None if p.y_raw_full is None else p.y_raw_full.copy(),
+            "x": None if p.x is None else p.x.copy(),
+            "y_raw": None if p.y_raw is None else p.y_raw.copy(),
+            "sample_names": list(p.sample_names),
+            "current_idx": self.current_selection_idx,
+            "lower_bound": self.lower_bound.get(),
+            "upper_bound": self.upper_bound.get(),
+        }
+        self.undo_stack.append(snap)
+        if len(self.undo_stack) > self.UNDO_LIMIT:
+            self.undo_stack.pop(0)
+        self._refresh_undo_button()
+
+    def _refresh_undo_button(self) -> None:
+        if hasattr(self, "undo_button"):
+            if self.undo_stack:
+                last = self.undo_stack[-1]["label"]
+                self.undo_button.config(
+                    state="normal", text=f"Undo: {last}"[:32]
+                )
+            else:
+                self.undo_button.config(state="disabled", text="Undo")
+
+    def _undo(self, event=None):
+        if not self.undo_stack:
+            self._update_status("Nothing to undo.")
+            return
+        snap = self.undo_stack.pop()
+        p = self.processor
+        p.x_full = snap["x_full"]
+        p.y_raw_full = snap["y_raw_full"]
+        p.x = snap["x"]
+        p.y_raw = snap["y_raw"]
+        p.sample_names = list(snap["sample_names"])
+        # Restore range UI
+        try:
+            self.lower_bound.set(snap["lower_bound"])
+            self.upper_bound.set(snap["upper_bound"])
+        except Exception:
+            pass
+        # Reset transient processing state — y_mid/baseline/etc. depended on
+        # old data and are no longer guaranteed to match.
+        self.y_raw = self.y_mid = self.baseline = self.y_final = self.y_processed = None
+        with self._batch_lock:
+            self.batch_result_df = None
+        # Restore listbox
+        self.listbox.delete(0, tk.END)
+        for n in p.sample_names:
+            self.listbox.insert(tk.END, n)
+        if p.y_raw_full is not None and p.y_raw_full.shape[1] > 0:
+            idx = snap["current_idx"]
+            if idx is None or idx >= p.y_raw_full.shape[1]:
+                idx = 0
+            self.current_selection_idx = idx
+            self.listbox.selection_set(idx)
+            self.listbox.see(idx)
+            self.info_label.config(text=f"Spectra: {p.y_raw_full.shape[1]}")
+            self._clear_and_redraw_raw()
+        else:
+            self.current_selection_idx = None
+            self.info_label.config(text="No file loaded.")
+            self.ax.clear()
+            self.canvas.draw()
+        self._refresh_undo_button()
+        self._update_status(f"Undone: {snap['label']}")
+
     def _refresh_listbox_after_import(self):
         """Repopulate the listbox from processor.sample_names and select the
         first unselected row. Invalidates cached batch results."""
@@ -709,6 +800,7 @@ class RamanProcessorApp:
             "This does not delete any source files."
         ):
             return
+        self._push_undo(f"Remove {len(sel)} spectra")
         n_removed = self.processor.remove_spectra(sel)
         # Reset transient processing state since indices have shifted
         self.y_raw = self.y_mid = self.baseline = self.y_final = self.y_processed = None
@@ -740,6 +832,7 @@ class RamanProcessorApp:
         ):
             return
         n = self.processor.y_raw_full.shape[1]
+        self._push_undo(f"Clear all ({n})")
         self.processor.remove_spectra(list(range(n)))
         self.y_raw = self.y_mid = self.baseline = self.y_final = self.y_processed = None
         self.listbox.delete(0, tk.END)
@@ -817,6 +910,13 @@ class RamanProcessorApp:
             messagebox.showerror("Input Error", "Enter valid numbers for range.")
             return
 
+        # Snapshot only if the range actually changes the working view to
+        # avoid spamming the stack on every selection-driven refresh.
+        if (self.processor.x is None
+                or self.processor.x.size == 0
+                or self.processor.x[0] != lower
+                or self.processor.x[-1] != upper):
+            self._push_undo(f"Range {lower:g}-{upper:g}")
         if not self.processor.filter_data_by_range(lower, upper):
             messagebox.showwarning(
                 "Range Warning", "No data in the specified range. Displaying full range."
@@ -1302,6 +1402,8 @@ class RamanProcessorApp:
         if self.processor.x is None:
             messagebox.showwarning("Calibration", "Please import data first.")
             return
+        # Snapshot before launching — calibration mutates the x axis in place.
+        self._push_undo("Wavelength calibration")
         CalibrationWindow(
             self.root, self.processor,
             on_applied=self._on_calibration_applied,

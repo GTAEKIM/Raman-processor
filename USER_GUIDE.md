@@ -144,6 +144,13 @@ python cli.py --help
 - **[Clear All]** 버튼으로 전체 초기화 (확인 대화상자 표시).
 - 원본 파일은 절대 삭제되지 않습니다 — 메모리상의 데이터셋만 변경됩니다.
 
+#### Undo (실행 취소)
+- **[Undo]** 버튼 또는 **Ctrl+Z** 단축키로 직전의 데이터셋 변경을 되돌릴 수 있습니다.
+- 추적되는 작업: Import / Append / Remove Selected / Clear All / Range filter / Wavelength calibration.
+- 최대 20단계까지 stack에 보관.
+- 처리 단계 (smoothing/baseline/normalization)는 즉시 재실행이 가능하므로 undo 대상이 아닙니다 — 데이터셋 자체에 가해진 파괴적 변경만 추적합니다.
+- Undo 버튼에 마지막 작업명이 표시됩니다 (예: `Undo: Remove 3 spectra`).
+
 샘플 리스트에서 처리할 스펙트럼을 선택한 뒤, **Raman shift range**에 lower / upper bound 입력 후 **Apply Range**.
 
 ### 4.2 Pre-processing
