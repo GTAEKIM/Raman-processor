@@ -51,6 +51,20 @@ class BaselineCorrectorWindow(tk.Toplevel):
         self.x_data = processor.x
         self.y_data = y_mid
         self.callback = callback
+        # Fallback: if no algorithms map provided, expose the built-in short
+        # codes so the combobox is never empty and _on_algo_select can resolve.
+        if not algorithms:
+            algorithms = {
+                "airpls": "airPLS",
+                "arpls": "arPLS",
+                "asls":  "ALS",
+                "snip":  "SNIP",
+                "atq":   "Asymmetric Truncated Quadratic",
+                "stq":   "Symmetric Truncated Quadratic",
+                "ah":    "Asymmetric Huber",
+                "sh":    "Symmetric Huber",
+                "mor":   "Morphological",
+            }
         self.algorithms_map = algorithms
         self.reverse_algo_map = {v: k for k, v in algorithms.items()}
         self.last_baseline: np.ndarray | None = None
@@ -76,6 +90,9 @@ class BaselineCorrectorWindow(tk.Toplevel):
 
         self._create_widgets()
         self._on_algo_select()
+        # Defensive: ensure the canvas always shows something on open, even
+        # if algo selection short-circuited for any reason.
+        self._update_plot()
         self.grab_set()
 
     def _merge_params(self, provided: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,9 +225,19 @@ class BaselineCorrectorWindow(tk.Toplevel):
 
     def _on_algo_select(self, event=None):
         selected_fullname = self.algorithm_fullname.get()
-        if selected_fullname not in self.reverse_algo_map:
-            return
-        short_code = self.reverse_algo_map[selected_fullname]
+        # Resolve the short code tolerantly:
+        #  1) display-name lookup (the normal case)
+        #  2) raw short code (if the dropdown value already IS a short code,
+        #     e.g. when baseline_algorithms config is missing or a plugin
+        #     short code leaked through)
+        #  3) fallback to current self.algorithm_code, else 'airpls'
+        if selected_fullname in self.reverse_algo_map:
+            short_code = self.reverse_algo_map[selected_fullname]
+        elif selected_fullname in self.algorithms_map:
+            short_code = selected_fullname
+        else:
+            short_code = self.algorithm_code.get() or 'airpls'
+
         self.algorithm_code.set(short_code)
         family = _algo_family(short_code)
 
