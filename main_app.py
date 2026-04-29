@@ -1008,9 +1008,21 @@ class RamanProcessorApp:
             )
 
     def _open_baseline_corrector(self):
+        # If smoothing wasn't applied, fall back to raw (or cosmic-cleaned)
+        # so the user can still adjust baseline.
         if self.y_mid is None:
-            messagebox.showwarning("Warning", "Please apply smoothing first.")
-            return
+            if self.current_selection_idx is None or self.processor.y_raw is None:
+                messagebox.showwarning(
+                    "Warning", "Please load and select a spectrum first."
+                )
+                return
+            self.y_raw = self.processor.y_raw[:, self.current_selection_idx]
+            current_y = self.y_raw.copy()
+            if self.apply_cosmic_ray.get():
+                current_y = self.processor.remove_cosmic_rays(current_y)
+            self.y_processed = current_y
+            self.y_mid = current_y.copy()
+            self._update_status("Smoothing skipped — opening baseline corrector on raw input.")
         BaselineCorrectorWindow(
             parent=self.root,
             processor=self.processor,

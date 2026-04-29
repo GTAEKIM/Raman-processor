@@ -540,7 +540,10 @@ class DataProcessor:
 
                 if prefix_with_filename:
                     stem = os.path.splitext(os.path.basename(fp))[0]
-                    names = [f"{stem}::{n}" for n in names]
+                    # If the file's internal sample name already equals the
+                    # file stem (Type-B 2-column files set it that way),
+                    # skip the prefix to avoid "stem::stem" duplication.
+                    names = [n if n == stem else f"{stem}::{n}" for n in names]
 
                 per_file.append((fp, x, y, names))
             except Exception as e:
@@ -686,7 +689,10 @@ class DataProcessor:
                 x = x[order]; y = y[order, :]
                 if prefix_with_filename:
                     stem = os.path.splitext(os.path.basename(fp))[0]
-                    names = [f"{stem}::{n}" for n in names]
+                    # If the file's internal sample name already equals the
+                    # file stem (Type-B 2-column files set it that way),
+                    # skip the prefix to avoid "stem::stem" duplication.
+                    names = [n if n == stem else f"{stem}::{n}" for n in names]
                 per_file.append((fp, x, y, names))
             except Exception as e:
                 logging.error(f"Failed to load {fp}: {e}")

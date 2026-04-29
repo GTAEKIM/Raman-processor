@@ -253,33 +253,55 @@ class BaselineCorrectorWindow(tk.Toplevel):
         return {}
 
     def _update_plot(self, event=None):
+        # Always redraw the spectrum first, then overlay baseline if we can
+        # compute it. Previously this would silently return on any error and
+        # leave the canvas blank.
+        self.ax.clear()
+        if self.x_data is None or self.y_data is None or self.y_data.size == 0:
+            self.ax.text(
+                0.5, 0.5, "No spectrum data available",
+                ha="center", va="center", transform=self.ax.transAxes, color="gray",
+            )
+            self.fig.tight_layout()
+            self.canvas.draw()
+            return
+
+        # Defensive: align x to y if length mismatch (e.g., stale axis after
+        # range filtering). Use index axis as a last-resort fallback.
+        x = self.x_data
+        if x is None or len(x) != len(self.y_data):
+            x = np.arange(len(self.y_data))
+
+        self.ax.plot(x, self.y_data, 'b-', label="Input")
+
+        baseline = None
+        err_msg = ""
         try:
             algo_code = self.algorithm_code.get()
             params = self._collect_current_params()
             baseline = self.processor.compute_baseline(self.y_data, algo_code, params)
-        except (tk.TclError, ValueError, RuntimeError):
-            return
-        except Exception:
-            return
+        except tk.TclError:
+            err_msg = "(invalid parameter value)"
+        except Exception as e:
+            err_msg = f"({type(e).__name__}: {e})"
 
-        self.ax.clear()
-        self.ax.plot(self.x_data, self.y_data, 'b-', label="SG Filtered")
-        self.ax.plot(self.x_data, baseline, 'm--', label="Estimated Baseline")
-        self.ax.plot(
-            self.x_data,
-            self.y_data - baseline,
-            'r-',
-            alpha=0.5,
-            label="Corrected",
-        )
-        self.ax.set_title("Real-time Baseline Adjustment")
+        if baseline is not None and len(baseline) == len(self.y_data):
+            self.ax.plot(x, baseline, 'm--', label="Estimated Baseline")
+            self.ax.plot(
+                x, self.y_data - baseline,
+                'r-', alpha=0.5, label="Corrected",
+            )
+            self.ax.set_title("Real-time Baseline Adjustment")
+            self.last_baseline = baseline
+        else:
+            self.ax.set_title(f"Baseline failed {err_msg}".strip())
+
         self.ax.set_xlabel("Raman shift (cm\u207b\u00b9)")
         self.ax.set_ylabel("Intensity (AU)")
         self.ax.legend()
         self.ax.grid(True)
         self.fig.tight_layout()
         self.canvas.draw()
-        self.last_baseline = baseline
 
     def _on_apply(self):
         if self.last_baseline is not None:
