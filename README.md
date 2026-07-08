@@ -8,6 +8,7 @@ A desktop GUI application for post-processing Raman spectroscopy data, built wit
 
 ## What's new
 
+- **v2.5** — Microalgae band-analysis module (literature-verified, editable pigment/lipid/saturated-FA/PUFA/protein/carbohydrate/total-biomass band library with compositional ratios), plus audit fixes (live parallel-batch progress, robust input handling, scoped keyboard/scroll bindings).
 - **v2.4** — Hyperspectral Raman mapping window, plugin architecture for baseline algorithms, headless CLI (`cli.py`).
 - **v2.3** — Clustering (HCA / K-means / UMAP), MCR-ALS multivariate curve resolution, wavelength calibration with reference peak library.
 - **v2.2** — Peak detection & fitting (lmfit Gaussian / Lorentzian / Voigt / PseudoVoigt), PCA diagnostics (Hotelling T² / Q-residuals / Scree plot), derivative spectra (SG 1st / 2nd), QC metrics (SNR, saturation, spike count).

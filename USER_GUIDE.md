@@ -358,6 +358,43 @@ python cli.py --help
 
 ---
 
+## 12-B. 미세조류 밴드 분석 (Microalgae Band Analysis)
+
+툴바 **[Microalgae Analysis]** 버튼으로 엽니다. 색소·지질·단백질·탄수화물 등의
+Raman 밴드 세기를 측정하고 조성 비율(불포화도, PUFA index, Lipid/Protein 등)을 계산합니다.
+
+### 데이터 소스
+- 배치 결과(`batch_result_df`)가 있으면 그대로 사용.
+- 없으면 현재 로드된 전체 스펙트럼을 **현재 파이프라인 설정으로 즉석 처리**하여 분석.
+
+### 측정 방법
+- **Metric**: `height`(윈도우 내 최대) / `area`(사다리꼴 적분) / `mean`.
+- **Subtract local linear baseline (권장)**: 각 밴드 윈도우 양 끝점을 잇는 직선을 빼서
+  잔류 형광/배경을 제거 후 세기 측정 — 비율의 정량성에 중요.
+
+### 밴드 라이브러리 (문헌 기반 기본값, 편집 가능)
+- 좌측 표에서 밴드(name/class/lo/hi)와 비율(name/numerator/denominator)을 **추가·편집·삭제**.
+- **[Save to config]** 로 `config.json`에 저장, **[Reset to defaults]** 로 복원.
+- 기본 밴드는 microalgae Raman 문헌(Wu *PNAS* 2011; Wei/Ni *Biotechnol. Biofuels* 2016–2017;
+  starch @478 정량 등)에서 검증:
+  - 카로티노이드 1008/1157/1520, 지질 CH₂ 1440·C=C 1655·ester 1736·CH₂ 2850/2885,
+    PUFA =C–H 3011, 포화 C–C 1063/1128, 단백질 Phe 1004·amide III 1250·amide I 1655,
+    탄수화물 starch 478·940·C–O 1082, 총 바이오매스 CH 2800–3025.
+- 기본 비율: 불포화도(I₁₆₅₈/I₁₄₄₁), 포화지수, PUFA index, Lipid/Protein,
+  Carotenoid/Lipid, Starch/Lipid, Total-lipid/biomass.
+
+### ⚠️ 겹침 주의 (문헌 근거)
+- **amide I(1650) ↔ 지질 C=C(1650)** 직접 겹침 → 불포화도는 지질체 위주 스펙트럼에서 신뢰.
+  단백질 마커는 amide III(~1250) 권장.
+- **Phe(1004) ↔ 카로티노이드 ν3(1008)** 근접 → 색소는 ν1(1520)로 확인.
+
+### 결과 & 내보내기
+- 우측 **Intensities / Ratios** 표(샘플 × 밴드/비율), **Bar chart** 탭에서 밴드·비율별 막대그래프.
+- 중앙 플롯: 선택 샘플 스펙트럼 위에 밴드 윈도우를 class별 색으로 음영 표시.
+- **[Export to Excel...]**: Intensities / Ratios / BandDefinitions / RatioDefinitions / Settings 시트.
+
+---
+
 ## 13. 플러그인 작성
 
 `plugins/baseline/` 디렉터리에 `.py` 파일을 넣기만 하면 앱 시작 시 자동 등록됩니다.

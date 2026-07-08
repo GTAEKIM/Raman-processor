@@ -24,6 +24,7 @@ from clustering_window import ClusteringWindow
 from mcr_als_window import MCRALSWindow
 from calibration_window import CalibrationWindow
 from mapping_window import MappingWindow
+from microalgae_window import MicroalgaeWindow
 
 logging.basicConfig(
     filename='app.log',
@@ -48,7 +49,7 @@ class CustomToolbar(NavigationToolbar2Tk):
 class RamanProcessorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Raman Spectroscopy Processor v2.4")
+        self.root.title("Raman Spectroscopy Processor v2.5")
         self.root.geometry("1280x820")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -189,6 +190,7 @@ class RamanProcessorApp:
 
     def _load_config(self) -> Dict[str, Any]:
         config_path = resource_path("config.json")
+        self._config_path = config_path
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -242,6 +244,7 @@ class RamanProcessorApp:
             ("folder-open-outline.png", "Import Data", self._import_data),
             ("parameters-import.png", "Import Parameters", self._import_params),
             (None, "Hyperspectral Mapping", self._open_mapping),
+            (None, "Microalgae Analysis", self._open_microalgae),
         ]
         for icon_file, text, cmd in btn_configs:
             icon = self._load_icon(icon_file) if icon_file else None
@@ -1587,6 +1590,46 @@ class RamanProcessorApp:
 
     def _open_mapping(self):
         MappingWindow(self.root, on_cube_to_batch=self._ingest_cube_dataframe)
+
+    def _build_processed_df(self):
+        """Return a batch-style DataFrame (col 0 = Raman shift, rest = samples)
+        for band analysis. Prefers cached batch results; otherwise processes the
+        loaded dataset through the current pipeline on the fly."""
+        with self._batch_lock:
+            cached = self.batch_result_df
+        if cached is not None and cached.shape[1] > 1:
+            return cached
+        if self.processor.y_raw is None or self.processor.x is None:
+            return None
+        params = self._collect_current_params()
+        n = self.processor.y_raw.shape[1]
+        cols = {}
+        for i in range(n):
+            try:
+                cols[self.processor.sample_names[i]] = self.processor.process_single_spectrum(
+                    self.processor.y_raw[:, i], params
+                )
+            except Exception as e:
+                logging.warning(f"Band-analysis pipeline failed for spectrum {i}: {e}")
+        if not cols:
+            return None
+        df = pd.DataFrame(cols)
+        df.insert(0, 'Raman shift (cm-1)', self.processor.x)
+        return df
+
+    def _open_microalgae(self):
+        df = self._build_processed_df()
+        if df is None:
+            messagebox.showwarning(
+                "Microalgae Analysis",
+                "Import data first (optionally run a batch). The spectra will be "
+                "processed with the current pipeline settings.",
+            )
+            return
+        MicroalgaeWindow(
+            self.root, df, self.config,
+            config_path=getattr(self, "_config_path", None),
+        )
 
     def _ingest_cube_dataframe(self, cube_df):
         """Receive a pixel-as-sample DataFrame from the mapping window."""

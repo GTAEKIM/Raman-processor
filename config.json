@@ -97,5 +97,39 @@
         "default_standard": "silicon",
         "default_order": 1,
         "match_tolerance_cm": 15.0
+    },
+    "microalgae_bands": [
+        {"name": "Carotenoid v3", "class": "Carotenoid", "lo": 998, "hi": 1015},
+        {"name": "Carotenoid v2 (C-C)", "class": "Carotenoid", "lo": 1145, "hi": 1170},
+        {"name": "Carotenoid v1 (C=C)", "class": "Carotenoid", "lo": 1505, "hi": 1535},
+        {"name": "Lipid CH2 bend", "class": "Lipid", "lo": 1430, "hi": 1455},
+        {"name": "Lipid C=C", "class": "Lipid", "lo": 1645, "hi": 1670},
+        {"name": "Lipid =C-H cis", "class": "Lipid", "lo": 1255, "hi": 1275},
+        {"name": "Lipid ester C=O", "class": "Lipid", "lo": 1725, "hi": 1750},
+        {"name": "Lipid CH2 sym str", "class": "Lipid", "lo": 2835, "hi": 2865},
+        {"name": "Lipid CH2 asym str", "class": "Lipid", "lo": 2870, "hi": 2905},
+        {"name": "PUFA =C-H str", "class": "PUFA", "lo": 3000, "hi": 3025},
+        {"name": "SatFA C-C (1063)", "class": "Saturated FA", "lo": 1055, "hi": 1073},
+        {"name": "SatFA C-C (1128)", "class": "Saturated FA", "lo": 1118, "hi": 1138},
+        {"name": "Protein Phe", "class": "Protein", "lo": 998, "hi": 1010},
+        {"name": "Protein amide III", "class": "Protein", "lo": 1240, "hi": 1300},
+        {"name": "Protein amide I", "class": "Protein", "lo": 1650, "hi": 1685},
+        {"name": "Starch glycosidic", "class": "Carbohydrate", "lo": 468, "hi": 488},
+        {"name": "Starch skeletal", "class": "Carbohydrate", "lo": 930, "hi": 950},
+        {"name": "Carbohydrate C-O", "class": "Carbohydrate", "lo": 1070, "hi": 1095},
+        {"name": "Total biomass CH", "class": "Total", "lo": 2800, "hi": 3025}
+    ],
+    "microalgae_ratios": [
+        {"name": "Unsaturation (I1658/I1441)", "numerator": "Lipid C=C", "denominator": "Lipid CH2 bend"},
+        {"name": "Saturation index", "numerator": "Lipid CH2 bend", "denominator": "Lipid C=C"},
+        {"name": "PUFA index", "numerator": "PUFA =C-H str", "denominator": "Lipid CH2 sym str"},
+        {"name": "Lipid/Protein", "numerator": "Lipid CH2 sym str", "denominator": "Protein amide III"},
+        {"name": "Carotenoid/Lipid", "numerator": "Carotenoid v1 (C=C)", "denominator": "Lipid CH2 bend"},
+        {"name": "Starch/Lipid", "numerator": "Starch glycosidic", "denominator": "Lipid CH2 bend"},
+        {"name": "Total-lipid/biomass", "numerator": "Lipid CH2 sym str", "denominator": "Total biomass CH"}
+    ],
+    "microalgae": {
+        "default_method": "height",
+        "local_baseline": true
     }
 }

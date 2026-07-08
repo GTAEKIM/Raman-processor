@@ -1727,6 +1727,119 @@ def cube_to_batch_df(cube: np.ndarray, raman_shifts: np.ndarray) -> pd.DataFrame
     return df
 
 
+# ───────────────────────── Microalgae band analysis ─────────────────────────
+
+
+def _local_baseline_subtract(
+    x: np.ndarray, y: np.ndarray, lo: float, hi: float
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Slice [lo, hi] and subtract a straight line drawn between the window's
+    two endpoints. This removes residual fluorescence/background under a band so
+    height/area measurements (and therefore ratios) are comparable across
+    samples. Returns (xs, ys_corrected) or (None, None) if the window is empty.
+    """
+    mask = (x >= lo) & (x <= hi)
+    if not np.any(mask):
+        return None, None
+    xs = x[mask]
+    ys = y[mask]
+    if len(xs) < 2:
+        return xs, ys
+    x0, x1 = xs[0], xs[-1]
+    y0, y1 = ys[0], ys[-1]
+    if x1 == x0:
+        base = np.full_like(ys, min(y0, y1))
+    else:
+        base = y0 + (y1 - y0) * (xs - x0) / (x1 - x0)
+    return xs, ys - base
+
+
+def band_metrics(
+    x: np.ndarray,
+    y: np.ndarray,
+    bands: List[Dict[str, Any]],
+    method: str = 'height',
+    local_baseline: bool = True,
+) -> Dict[str, float]:
+    """Per-band intensity metric for a single spectrum.
+
+    bands: list of {name, lo, hi, [class]}.
+    method: 'height' (max in window) | 'area' (trapezoid) | 'mean'.
+    local_baseline: subtract a straight line between window endpoints first.
+    Returns {band_name: value}; NaN when the window has no data points.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    out: Dict[str, float] = {}
+    for b in bands:
+        lo, hi = sorted((float(b['lo']), float(b['hi'])))
+        if local_baseline:
+            xs, ys = _local_baseline_subtract(x, y, lo, hi)
+        else:
+            mask = (x >= lo) & (x <= hi)
+            xs = x[mask] if np.any(mask) else None
+            ys = y[mask] if np.any(mask) else None
+        if xs is None or len(xs) == 0:
+            out[b['name']] = float('nan')
+            continue
+        if method == 'height':
+            out[b['name']] = float(np.max(ys))
+        elif method == 'area':
+            out[b['name']] = float(np.trapezoid(ys, xs)) if len(xs) > 1 else float(ys[0])
+        elif method == 'mean':
+            out[b['name']] = float(np.mean(ys))
+        else:
+            raise ValueError(f"Unknown band metric method: {method}")
+    return out
+
+
+def compute_band_ratios(
+    metrics: Dict[str, float], ratio_defs: List[Dict[str, Any]]
+) -> Dict[str, float]:
+    """Compute named ratios from a band-metric dict. Each ratio def has
+    {name, numerator, denominator} referencing band names. NaN on missing band
+    or divide-by-zero."""
+    out: Dict[str, float] = {}
+    for r in ratio_defs:
+        num = metrics.get(r['numerator'], float('nan'))
+        den = metrics.get(r['denominator'], float('nan'))
+        if (num is None or den is None or not np.isfinite(num)
+                or not np.isfinite(den) or den == 0):
+            out[r['name']] = float('nan')
+        else:
+            out[r['name']] = float(num / den)
+    return out
+
+
+def microalgae_report(
+    processed_df: pd.DataFrame,
+    bands: List[Dict[str, Any]],
+    ratio_defs: List[Dict[str, Any]],
+    method: str = 'height',
+    local_baseline: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Band intensities and ratios for every sample in a batch processed_df
+    (col 0 = 'Raman shift (cm-1)', remaining cols = samples).
+    Returns (intensity_df, ratio_df) with samples as rows.
+    """
+    x = processed_df.iloc[:, 0].values.astype(float)
+    sample_cols = list(processed_df.columns[1:])
+    int_rows: Dict[str, Dict[str, float]] = {}
+    ratio_rows: Dict[str, Dict[str, float]] = {}
+    for name in sample_cols:
+        y = processed_df[name].values.astype(float)
+        m = band_metrics(x, y, bands, method=method, local_baseline=local_baseline)
+        int_rows[name] = m
+        ratio_rows[name] = compute_band_ratios(m, ratio_defs)
+    intensity_df = pd.DataFrame(int_rows).T
+    ratio_df = pd.DataFrame(ratio_rows).T
+    if bands:
+        intensity_df = intensity_df.reindex(columns=[b['name'] for b in bands])
+    if ratio_defs:
+        ratio_df = ratio_df.reindex(columns=[r['name'] for r in ratio_defs])
+    return intensity_df, ratio_df
+
+
 # ───────────────────────── Plugin Registry ─────────────────────────
 
 
