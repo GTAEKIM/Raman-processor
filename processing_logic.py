@@ -110,7 +110,15 @@ def compute_snr(
     """
     mask = (x >= noise_region[0]) & (x <= noise_region[1])
     if not np.any(mask):
-        return float('nan')
+        # Configured silent region falls outside the active range — fall back
+        # to the highest-frequency 5% of the axis so SNR is still estimable
+        # instead of silently returning NaN.
+        n = len(x)
+        if n < 3:
+            return float('nan')
+        cut = max(1, int(round(n * 0.05)))
+        mask = np.zeros(n, dtype=bool)
+        mask[-cut:] = True
     noise_std = float(np.std(y[mask]))
     signal_pp = float(np.max(y) - np.min(y))
     if noise_std == 0:
@@ -1150,15 +1158,25 @@ class DataProcessor:
         x = self.x
         sample_names = self.sample_names
 
-        # Using threading backend — pybaselines/numpy release the GIL
-        # and avoid pickling the DataProcessor instance.
-        outputs = Parallel(n_jobs=n_jobs, backend='threading')(
-            delayed(_process_worker)(i, y_all[:, i], x, params, sample_names[i])
-            for i in range(total)
-        )
-
+        # Threading backend avoids pickling the DataProcessor and lets workers
+        # share the read-only input arrays. return_as='generator' (joblib ≥1.3)
+        # yields results as tasks complete, so the progress callback advances
+        # live instead of jumping 0→100% only after everything finishes.
         results = np.full((n_points, total), np.nan, dtype=float)
         statuses = [False] * total
+        try:
+            outputs = Parallel(n_jobs=n_jobs, backend='threading',
+                               return_as='generator')(
+                delayed(_process_worker)(i, y_all[:, i], x, params, sample_names[i])
+                for i in range(total)
+            )
+        except TypeError:
+            # Older joblib without return_as — fall back to eager list.
+            outputs = Parallel(n_jobs=n_jobs, backend='threading')(
+                delayed(_process_worker)(i, y_all[:, i], x, params, sample_names[i])
+                for i in range(total)
+            )
+
         for idx, (ok, y_final) in enumerate(outputs):
             if ok:
                 results[:, idx] = y_final
@@ -1192,7 +1210,10 @@ class DataProcessor:
 
         data_scaled, scale_info = apply_pca_scaling(data_transposed, method=scaling)
 
-        n_components = min(n_components, n_samples, data_scaled.shape[1])
+        # Clamp to n_samples-1 (not n_samples) so the T²/Q F-distribution limit
+        # always has a positive residual degrees-of-freedom (n - k > 0) and does
+        # not collapse to NaN when the user requests as many components as samples.
+        n_components = max(1, min(n_components, n_samples - 1, data_scaled.shape[1]))
 
         pca = PCA(n_components=n_components)
         scores = pca.fit_transform(data_scaled)

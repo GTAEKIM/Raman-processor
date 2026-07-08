@@ -55,10 +55,11 @@ class RamanProcessorApp:
         self.processor = DataProcessor()
         self.config = self._load_config()
 
-        # Global Ctrl+Z / Cmd+Z for undo
-        self.root.bind_all("<Control-z>", self._undo)
-        self.root.bind_all("<Control-Z>", self._undo)
-        self.root.bind_all("<Command-z>", self._undo)
+        # Ctrl+Z / Cmd+Z for undo — bound to the main window (not bind_all) and
+        # guarded so it doesn't hijack in-field text editing or sub-windows.
+        self.root.bind("<Control-z>", self._undo)
+        self.root.bind("<Control-Z>", self._undo)
+        self.root.bind("<Command-z>", self._undo)
 
         # Auto-load baseline plugins from ./plugins
         try:
@@ -270,11 +271,20 @@ class RamanProcessorApp:
         panel.bind("<Configure>", _on_panel_config)
         canvas.bind("<Configure>", _on_canvas_config)
 
-        # Mouse wheel scrolling
+        # Mouse wheel scrolling — bound only while the cursor is over this
+        # sidebar (via <Enter>/<Leave>) so it doesn't hijack the wheel over the
+        # plot or other Toplevel windows.
         def _on_wheel(event):
             canvas.yview_scroll(int(-event.delta / 120), "units")
 
-        canvas.bind_all("<MouseWheel>", _on_wheel)
+        def _bind_wheel(_event):
+            canvas.bind_all("<MouseWheel>", _on_wheel)
+
+        def _unbind_wheel(_event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
 
         self._build_sidebar_sections(panel)
         return outer
@@ -727,6 +737,15 @@ class RamanProcessorApp:
                 self.undo_button.config(state="disabled", text="Undo")
 
     def _undo(self, event=None):
+        # Ignore the shortcut while a text-entry widget has focus so it doesn't
+        # steal Ctrl+Z from normal in-field editing (or from sub-windows).
+        if event is not None:
+            try:
+                focused = self.root.focus_get()
+                if isinstance(focused, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox)):
+                    return
+            except Exception:
+                pass
         if not self.undo_stack:
             self._update_status("Nothing to undo.")
             return
@@ -859,12 +878,18 @@ class RamanProcessorApp:
             with open(filepath, 'r', encoding='utf-8') as f:
                 params = json.load(f)
 
-            self.lower_bound.set(params['range']['lower_bound'])
-            self.upper_bound.set(params['range']['upper_bound'])
-            self.sg_poly_order.set(params['smoothing']['sg_poly_order'])
-            self.sg_frame_window.set(params['smoothing']['sg_frame_window'])
-            self.apply_smoothing.set(params['smoothing'].get('enabled', True))
-            self.baseline_params = params['baseline']
+            # Tolerate partial / hand-written / older param files: use .get with
+            # the current values as defaults instead of KeyError-ing on a missing
+            # section.
+            rng = params.get('range', {})
+            self.lower_bound.set(rng.get('lower_bound', self.lower_bound.get()))
+            self.upper_bound.set(rng.get('upper_bound', self.upper_bound.get()))
+            sm = params.get('smoothing', {})
+            self.sg_poly_order.set(sm.get('sg_poly_order', self.sg_poly_order.get()))
+            self.sg_frame_window.set(sm.get('sg_frame_window', self.sg_frame_window.get()))
+            self.apply_smoothing.set(sm.get('enabled', True))
+            if 'baseline' in params:
+                self.baseline_params = params['baseline']
             self.baseline_algo_label.config(text=self._baseline_summary())
             if 'preprocessing' in params:
                 self.apply_cosmic_ray.set(
