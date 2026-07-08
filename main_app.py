@@ -26,6 +26,7 @@ from calibration_window import CalibrationWindow
 from mapping_window import MappingWindow
 from microalgae_window import MicroalgaeWindow
 from ml_analysis_window import MLAnalysisWindow
+from ui_helpers import scrolled
 
 logging.basicConfig(
     filename='app.log',
@@ -356,8 +357,11 @@ class RamanProcessorApp:
         file_frame.pack(fill="x", pady=5, padx=2)
         self.info_label = ttk.Label(file_frame, text="No file loaded.", wraplength=250)
         self.info_label.pack(padx=5, pady=5)
-        self.listbox = tk.Listbox(file_frame, height=8, selectmode=tk.EXTENDED)
-        self.listbox.pack(fill="x", expand=True, padx=5, pady=5)
+        self.listbox = scrolled(
+            file_frame,
+            lambda c: tk.Listbox(c, height=8, selectmode=tk.EXTENDED),
+            horizontal=True,
+            pack={"fill": "both", "expand": True, "padx": 5, "pady": 5})
         self.listbox.bind('<<ListboxSelect>>', self._on_listbox_select)
         btn_row = ttk.Frame(file_frame)
         btn_row.pack(fill="x", padx=5, pady=2)

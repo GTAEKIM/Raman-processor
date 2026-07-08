@@ -23,6 +23,7 @@ from processing_logic import (
     ml_matrix, perform_plsda, perform_plsr, perform_classifier,
     perform_tsne, spectral_match,
 )
+from ui_helpers import scrolled
 
 _MODELS = {
     "PLS-DA (classification)": "plsda",
@@ -88,13 +89,13 @@ class MLAnalysisWindow(tk.Toplevel):
         lab.pack(fill="both", expand=True, padx=4, pady=4)
         ttk.Label(lab, text="Double-click a row to set its label/target.",
                   foreground="gray").pack(anchor="w", padx=4)
-        self.label_tree = ttk.Treeview(lab, columns=("sample", "label"),
-                                       show="headings", height=10)
+        self.label_tree = scrolled(
+            lab, lambda c: ttk.Treeview(c, columns=("sample", "label"),
+                                        show="headings", height=10))
         self.label_tree.heading("sample", text="sample")
         self.label_tree.heading("label", text="label / target")
-        self.label_tree.column("sample", width=170, anchor="w")
-        self.label_tree.column("label", width=120, anchor="w")
-        self.label_tree.pack(fill="both", expand=True, padx=4, pady=4)
+        self.label_tree.column("sample", width=170, anchor="w", stretch=False)
+        self.label_tree.column("label", width=120, anchor="w", stretch=False)
         self.label_tree.bind("<Double-1>", lambda e: self._edit_label())
         lrow = ttk.Frame(lab); lrow.pack(fill="x", padx=4, pady=2)
         ttk.Button(lrow, text="Import labels CSV...",
@@ -141,8 +142,10 @@ class MLAnalysisWindow(tk.Toplevel):
         self.nb.pack(fill="both", expand=True, padx=4, pady=4)
 
         mt = ttk.Frame(self.nb); self.nb.add(mt, text="Metrics")
-        self.metrics_text = tk.Text(mt, wrap="word", height=10)
-        self.metrics_text.pack(fill="both", expand=True, padx=4, pady=4)
+        self.metrics_text = scrolled(
+            mt, lambda c: tk.Text(c, wrap="none", height=10,
+                                  font=("Consolas", 10)),
+            vertical=True, horizontal=True)
 
         pl = ttk.Frame(self.nb); self.nb.add(pl, text="Plot")
         self.fig_main, self.ax_main = plt.subplots(figsize=(6, 5))

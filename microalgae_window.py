@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from processing_logic import band_metrics, compute_band_ratios, microalgae_report
+from ui_helpers import scrolled
 
 
 _CAVEAT = (
@@ -114,11 +115,11 @@ class MicroalgaeWindow(tk.Toplevel):
         bl = ttk.LabelFrame(parent, text="Band library (cm⁻¹)")
         bl.pack(fill="both", expand=True, padx=4, pady=4)
         cols = ("name", "class", "lo", "hi", "ref")
-        self.band_tree = ttk.Treeview(bl, columns=cols, show="headings", height=10)
+        self.band_tree = scrolled(
+            bl, lambda c: ttk.Treeview(c, columns=cols, show="headings", height=10))
         for c, w in zip(cols, (135, 80, 48, 48, 75)):
             self.band_tree.heading(c, text=c)
-            self.band_tree.column(c, width=w, anchor="w")
-        self.band_tree.pack(fill="both", expand=True, padx=4, pady=4)
+            self.band_tree.column(c, width=w, anchor="w", stretch=False)
         self.band_tree.bind("<Double-1>", lambda e: self._edit_band())
         brow = ttk.Frame(bl); brow.pack(fill="x", padx=4, pady=2)
         ttk.Button(brow, text="Add", command=self._add_band).pack(side="left", expand=True, fill="x", padx=1)
@@ -129,11 +130,11 @@ class MicroalgaeWindow(tk.Toplevel):
         rl = ttk.LabelFrame(parent, text="Ratios")
         rl.pack(fill="both", expand=True, padx=4, pady=4)
         rcols = ("name", "numerator", "denominator", "ref")
-        self.ratio_tree = ttk.Treeview(rl, columns=rcols, show="headings", height=6)
+        self.ratio_tree = scrolled(
+            rl, lambda c: ttk.Treeview(c, columns=rcols, show="headings", height=6))
         for c, w in zip(rcols, (120, 100, 100, 70)):
             self.ratio_tree.heading(c, text=c)
-            self.ratio_tree.column(c, width=w, anchor="w")
-        self.ratio_tree.pack(fill="both", expand=True, padx=4, pady=4)
+            self.ratio_tree.column(c, width=w, anchor="w", stretch=False)
         self.ratio_tree.bind("<Double-1>", lambda e: self._edit_ratio())
         rrow = ttk.Frame(rl); rrow.pack(fill="x", padx=4, pady=2)
         ttk.Button(rrow, text="Add", command=self._add_ratio).pack(side="left", expand=True, fill="x", padx=1)
@@ -166,19 +167,11 @@ class MicroalgaeWindow(tk.Toplevel):
 
         # Intensities tab
         it = ttk.Frame(nb); nb.add(it, text="Intensities")
-        self.int_tree = ttk.Treeview(it, show="headings", height=12)
-        self.int_tree.pack(fill="both", expand=True, side="left")
-        isb = ttk.Scrollbar(it, orient="horizontal", command=self.int_tree.xview)
-        self.int_tree.configure(xscrollcommand=isb.set)
-        isb.pack(fill="x", side="bottom")
+        self.int_tree = scrolled(it, lambda c: ttk.Treeview(c, show="headings", height=12))
 
         # Ratios tab
         rt = ttk.Frame(nb); nb.add(rt, text="Ratios")
-        self.rat_tree = ttk.Treeview(rt, show="headings", height=12)
-        self.rat_tree.pack(fill="both", expand=True, side="left")
-        rsb = ttk.Scrollbar(rt, orient="horizontal", command=self.rat_tree.xview)
-        self.rat_tree.configure(xscrollcommand=rsb.set)
-        rsb.pack(fill="x", side="bottom")
+        self.rat_tree = scrolled(rt, lambda c: ttk.Treeview(c, show="headings", height=12))
 
         # Bar chart tab
         bc = ttk.Frame(nb); nb.add(bc, text="Bar chart")
@@ -201,12 +194,12 @@ class MicroalgaeWindow(tk.Toplevel):
                   foreground="gray", wraplength=400, justify="left").pack(
             anchor="w", padx=4, pady=(4, 2))
         scols = ("key", "citation")
-        self.src_tree = ttk.Treeview(src, columns=scols, show="headings", height=8)
+        self.src_tree = scrolled(
+            src, lambda c: ttk.Treeview(c, columns=scols, show="headings", height=8))
         self.src_tree.heading("key", text="key")
-        self.src_tree.column("key", width=80, anchor="w")
+        self.src_tree.column("key", width=80, anchor="w", stretch=False)
         self.src_tree.heading("citation", text="citation")
         self.src_tree.column("citation", width=320, anchor="w")
-        self.src_tree.pack(fill="both", expand=True, padx=4, pady=4)
         for r in self.references:
             self.src_tree.insert("", "end", values=(r.get("key", ""), r.get("citation", "")))
         self.src_tree.bind("<Double-1>", self._open_reference)
@@ -415,7 +408,10 @@ class MicroalgaeWindow(tk.Toplevel):
         tree["columns"] = cols
         for c in cols:
             tree.heading(c, text=c)
-            tree.column(c, width=max(70, min(160, 9 * len(str(c)))), anchor="center")
+            # stretch=False + fixed width so the horizontal scrollbar engages
+            # when there are more/wider columns than the panel width.
+            tree.column(c, width=max(80, min(170, 9 * len(str(c)))),
+                        anchor="center", stretch=False)
         for name, row in df.iterrows():
             vals = [name] + [("" if pd.isna(v) else f"{v:.3g}") for v in row.values]
             tree.insert("", "end", values=vals)

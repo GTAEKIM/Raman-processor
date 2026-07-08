@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from processing_logic import detect_peaks, fit_peaks, PEAK_PROFILES
+from ui_helpers import scrolled
 
 
 class PeakAnalysisWindow(tk.Toplevel):
@@ -139,11 +140,12 @@ class PeakAnalysisWindow(tk.Toplevel):
 
     def _build_table(self, parent):
         cols = ("index", "center", "fwhm", "amplitude", "height", "area")
-        self.tree = ttk.Treeview(parent, columns=cols, show="headings")
+        self.tree = scrolled(
+            parent, lambda c: ttk.Treeview(c, columns=cols, show="headings"),
+            pack={"fill": "both", "expand": True, "padx": 5, "pady": 5})
         for c in cols:
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=110, anchor="center")
-        self.tree.pack(fill="both", expand=True, padx=5, pady=5)
+            self.tree.column(c, width=110, anchor="center", stretch=False)
 
     def _build_report(self, parent):
         self.report_text = tk.Text(parent, wrap="word", font=("Courier New", 9))
