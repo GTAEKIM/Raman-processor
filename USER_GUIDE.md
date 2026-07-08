@@ -388,10 +388,15 @@ Raman 밴드 세기를 측정하고 조성 비율(불포화도, PUFA index, Lipi
   단백질 마커는 amide III(~1250) 권장.
 - **Phe(1004) ↔ 카로티노이드 ν3(1008)** 근접 → 색소는 ν1(1520)로 확인.
 
+### 출처(References) 확인
+- 각 밴드·비율에는 **ref**(출처 키)가 붙어 있고, 밴드/비율 표의 `ref` 열에서 확인 가능.
+- 우측 **Sources** 탭에 전체 참고문헌(키 + 인용정보)이 표시되며, **행을 더블클릭하면 해당 논문이 브라우저로 열립니다**.
+- 밴드/비율 편집 대화상자의 **Reference** 드롭다운에서 출처를 지정할 수 있습니다.
+
 ### 결과 & 내보내기
 - 우측 **Intensities / Ratios** 표(샘플 × 밴드/비율), **Bar chart** 탭에서 밴드·비율별 막대그래프.
 - 중앙 플롯: 선택 샘플 스펙트럼 위에 밴드 윈도우를 class별 색으로 음영 표시.
-- **[Export to Excel...]**: Intensities / Ratios / BandDefinitions / RatioDefinitions / Settings 시트.
+- **[Export to Excel...]**: Intensities / Ratios / BandDefinitions / RatioDefinitions / **References** / Settings 시트.
 
 ---
 

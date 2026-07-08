@@ -18,6 +18,7 @@ Scientific caveats (shown in the UI):
 
 import os
 import json
+import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from typing import Optional, List, Dict, Any
@@ -54,6 +55,8 @@ class MicroalgaeWindow(tk.Toplevel):
         # Working copies of the editable library
         self.bands: List[Dict[str, Any]] = [dict(b) for b in config.get("microalgae_bands", [])]
         self.ratios: List[Dict[str, Any]] = [dict(r) for r in config.get("microalgae_ratios", [])]
+        self.references: List[Dict[str, Any]] = [dict(r) for r in config.get("microalgae_references", [])]
+        self._ref_by_key = {r.get("key", ""): r for r in self.references}
 
         mcfg = config.get("microalgae", {})
         self.method_var = tk.StringVar(value=mcfg.get("default_method", "height"))
@@ -110,9 +113,9 @@ class MicroalgaeWindow(tk.Toplevel):
         # Band library
         bl = ttk.LabelFrame(parent, text="Band library (cm⁻¹)")
         bl.pack(fill="both", expand=True, padx=4, pady=4)
-        cols = ("name", "class", "lo", "hi")
+        cols = ("name", "class", "lo", "hi", "ref")
         self.band_tree = ttk.Treeview(bl, columns=cols, show="headings", height=10)
-        for c, w in zip(cols, (140, 90, 55, 55)):
+        for c, w in zip(cols, (135, 80, 48, 48, 75)):
             self.band_tree.heading(c, text=c)
             self.band_tree.column(c, width=w, anchor="w")
         self.band_tree.pack(fill="both", expand=True, padx=4, pady=4)
@@ -125,9 +128,9 @@ class MicroalgaeWindow(tk.Toplevel):
         # Ratio library
         rl = ttk.LabelFrame(parent, text="Ratios")
         rl.pack(fill="both", expand=True, padx=4, pady=4)
-        rcols = ("name", "numerator", "denominator")
+        rcols = ("name", "numerator", "denominator", "ref")
         self.ratio_tree = ttk.Treeview(rl, columns=rcols, show="headings", height=6)
-        for c, w in zip(rcols, (130, 110, 110)):
+        for c, w in zip(rcols, (120, 100, 100, 70)):
             self.ratio_tree.heading(c, text=c)
             self.ratio_tree.column(c, width=w, anchor="w")
         self.ratio_tree.pack(fill="both", expand=True, padx=4, pady=4)
@@ -191,21 +194,55 @@ class MicroalgaeWindow(tk.Toplevel):
         self.canvas_bar = FigureCanvasTkAgg(self.fig_bar, master=bc)
         self.canvas_bar.get_tk_widget().pack(fill="both", expand=True)
 
+        # Sources tab — literature references for the band library
+        src = ttk.Frame(nb); nb.add(src, text="Sources")
+        ttk.Label(src, text="Literature sources for the band library. "
+                            "Double-click a row to open it in your browser.",
+                  foreground="gray", wraplength=400, justify="left").pack(
+            anchor="w", padx=4, pady=(4, 2))
+        scols = ("key", "citation")
+        self.src_tree = ttk.Treeview(src, columns=scols, show="headings", height=8)
+        self.src_tree.heading("key", text="key")
+        self.src_tree.column("key", width=80, anchor="w")
+        self.src_tree.heading("citation", text="citation")
+        self.src_tree.column("citation", width=320, anchor="w")
+        self.src_tree.pack(fill="both", expand=True, padx=4, pady=4)
+        for r in self.references:
+            self.src_tree.insert("", "end", values=(r.get("key", ""), r.get("citation", "")))
+        self.src_tree.bind("<Double-1>", self._open_reference)
+        ttk.Button(src, text="Open selected source in browser",
+                   command=self._open_reference).pack(fill="x", padx=4, pady=(0, 4))
+
         ttk.Button(parent, text="Export to Excel...",
                    command=self._export).pack(fill="x", padx=4, pady=4)
+
+    def _open_reference(self, event=None):
+        sel = self.src_tree.selection()
+        if not sel:
+            return
+        key = self.src_tree.item(sel[0], "values")[0]
+        ref = self._ref_by_key.get(key)
+        if ref and ref.get("url"):
+            try:
+                webbrowser.open(ref["url"])
+                self.title(f"Microalgae Band Analysis — opened {key}")
+            except Exception as e:
+                messagebox.showerror("Open source", str(e))
 
     # ── Library tree helpers ───────────────────────────────────────────
     def _refresh_band_tree(self):
         self.band_tree.delete(*self.band_tree.get_children())
         for b in self.bands:
             self.band_tree.insert("", "end", values=(
-                b.get("name", ""), b.get("class", ""), b.get("lo", ""), b.get("hi", "")))
+                b.get("name", ""), b.get("class", ""), b.get("lo", ""),
+                b.get("hi", ""), b.get("ref", "")))
 
     def _refresh_ratio_tree(self):
         self.ratio_tree.delete(*self.ratio_tree.get_children())
         for r in self.ratios:
             self.ratio_tree.insert("", "end", values=(
-                r.get("name", ""), r.get("numerator", ""), r.get("denominator", "")))
+                r.get("name", ""), r.get("numerator", ""),
+                r.get("denominator", ""), r.get("ref", "")))
 
     def _selected_index(self, tree) -> Optional[int]:
         sel = tree.selection()
@@ -231,7 +268,7 @@ class MicroalgaeWindow(tk.Toplevel):
         self._refresh_band_tree()
 
     def _band_dialog(self, index: Optional[int]):
-        b = self.bands[index] if index is not None else {"name": "", "class": "", "lo": 0.0, "hi": 0.0}
+        b = self.bands[index] if index is not None else {"name": "", "class": "", "lo": 0.0, "hi": 0.0, "ref": ""}
         dlg = tk.Toplevel(self); dlg.title("Band"); dlg.grab_set()
         dlg.transient(self)
         vars_ = {
@@ -240,10 +277,15 @@ class MicroalgaeWindow(tk.Toplevel):
             "lo": tk.StringVar(value=str(b.get("lo", ""))),
             "hi": tk.StringVar(value=str(b.get("hi", ""))),
         }
+        ref_v = tk.StringVar(value=b.get("ref", ""))
+        ref_keys = [r.get("key", "") for r in self.references]
         for i, (lbl, key) in enumerate([("Name", "name"), ("Class", "class"),
                                         ("Low (cm⁻¹)", "lo"), ("High (cm⁻¹)", "hi")]):
             ttk.Label(dlg, text=lbl).grid(row=i, column=0, sticky="w", padx=6, pady=4)
             ttk.Entry(dlg, textvariable=vars_[key], width=24).grid(row=i, column=1, padx=6, pady=4)
+        ttk.Label(dlg, text="Reference").grid(row=4, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(dlg, textvariable=ref_v, values=ref_keys, width=22).grid(
+            row=4, column=1, padx=6, pady=4)
 
         def save():
             try:
@@ -252,6 +294,7 @@ class MicroalgaeWindow(tk.Toplevel):
                     "class": vars_["class"].get().strip(),
                     "lo": float(vars_["lo"].get()),
                     "hi": float(vars_["hi"].get()),
+                    "ref": ref_v.get().strip(),
                 }
             except ValueError:
                 messagebox.showerror("Band", "Low/High must be numbers.", parent=dlg)
@@ -266,7 +309,7 @@ class MicroalgaeWindow(tk.Toplevel):
             self._refresh_band_tree()
             dlg.destroy()
 
-        ttk.Button(dlg, text="Save", command=save).grid(row=4, column=0, columnspan=2, pady=8)
+        ttk.Button(dlg, text="Save", command=save).grid(row=5, column=0, columnspan=2, pady=8)
 
     def _add_ratio(self):
         self._ratio_dialog(None)
@@ -286,12 +329,14 @@ class MicroalgaeWindow(tk.Toplevel):
         self._refresh_ratio_tree()
 
     def _ratio_dialog(self, index: Optional[int]):
-        r = self.ratios[index] if index is not None else {"name": "", "numerator": "", "denominator": ""}
+        r = self.ratios[index] if index is not None else {"name": "", "numerator": "", "denominator": "", "ref": ""}
         names = [b["name"] for b in self.bands]
+        ref_keys = [rr.get("key", "") for rr in self.references]
         dlg = tk.Toplevel(self); dlg.title("Ratio"); dlg.grab_set(); dlg.transient(self)
         name_v = tk.StringVar(value=r.get("name", ""))
         num_v = tk.StringVar(value=r.get("numerator", ""))
         den_v = tk.StringVar(value=r.get("denominator", ""))
+        ref_v = tk.StringVar(value=r.get("ref", ""))
         ttk.Label(dlg, text="Name").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(dlg, textvariable=name_v, width=26).grid(row=0, column=1, padx=6, pady=4)
         ttk.Label(dlg, text="Numerator").grid(row=1, column=0, sticky="w", padx=6, pady=4)
@@ -300,12 +345,16 @@ class MicroalgaeWindow(tk.Toplevel):
         ttk.Label(dlg, text="Denominator").grid(row=2, column=0, sticky="w", padx=6, pady=4)
         ttk.Combobox(dlg, textvariable=den_v, values=names, state="readonly",
                      width=24).grid(row=2, column=1, padx=6, pady=4)
+        ttk.Label(dlg, text="Reference").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(dlg, textvariable=ref_v, values=ref_keys, width=22).grid(
+            row=3, column=1, padx=6, pady=4)
 
         def save():
             new = {"name": name_v.get().strip(),
-                   "numerator": num_v.get(), "denominator": den_v.get()}
+                   "numerator": num_v.get(), "denominator": den_v.get(),
+                   "ref": ref_v.get().strip()}
             if not (new["name"] and new["numerator"] and new["denominator"]):
-                messagebox.showerror("Ratio", "All fields are required.", parent=dlg)
+                messagebox.showerror("Ratio", "Name/numerator/denominator are required.", parent=dlg)
                 return
             if index is not None:
                 self.ratios[index] = new
@@ -314,7 +363,7 @@ class MicroalgaeWindow(tk.Toplevel):
             self._refresh_ratio_tree()
             dlg.destroy()
 
-        ttk.Button(dlg, text="Save", command=save).grid(row=3, column=0, columnspan=2, pady=8)
+        ttk.Button(dlg, text="Save", command=save).grid(row=4, column=0, columnspan=2, pady=8)
 
     def _reset_defaults(self):
         if not messagebox.askyesno("Reset", "Reset band library and ratios to config defaults?"):
@@ -326,6 +375,7 @@ class MicroalgaeWindow(tk.Toplevel):
     def _save_to_config(self):
         self.config["microalgae_bands"] = [dict(b) for b in self.bands]
         self.config["microalgae_ratios"] = [dict(r) for r in self.ratios]
+        self.config["microalgae_references"] = [dict(r) for r in self.references]
         if not self.config_path:
             messagebox.showwarning("Save", "No config path known; changes kept in memory only.")
             return
@@ -436,6 +486,8 @@ class MicroalgaeWindow(tk.Toplevel):
                 self.ratio_df.to_excel(w, sheet_name="Ratios")
                 pd.DataFrame(self.bands).to_excel(w, sheet_name="BandDefinitions", index=False)
                 pd.DataFrame(self.ratios).to_excel(w, sheet_name="RatioDefinitions", index=False)
+                if self.references:
+                    pd.DataFrame(self.references).to_excel(w, sheet_name="References", index=False)
                 pd.DataFrame({
                     "setting": ["method", "local_baseline"],
                     "value": [self.method_var.get(), self.local_bl_var.get()],

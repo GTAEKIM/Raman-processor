@@ -80,6 +80,15 @@ def test_config_default_library_loads():
     for r in cfg["microalgae_ratios"]:
         assert r["numerator"] in names, r
         assert r["denominator"] in names, r
+    # Every band/ratio 'ref' resolves to a known reference key with a URL
+    refs = {r["key"]: r for r in cfg.get("microalgae_references", [])}
+    assert refs, "no microalgae_references defined"
+    for r in refs.values():
+        assert r.get("url"), r
+        assert r.get("citation"), r
+    for item in cfg["microalgae_bands"] + cfg["microalgae_ratios"]:
+        if item.get("ref"):
+            assert item["ref"] in refs, f"unknown ref: {item}"
 
 
 def test_normalize_snv_zero_mean_unit_std():
