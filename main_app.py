@@ -183,8 +183,58 @@ class RamanProcessorApp:
         self.apply_cosmic_ray = tk.BooleanVar(value=False)
 
         self.icon_images: Dict[str, tk.PhotoImage] = {}
+        self._setup_style()
         self._build_ui()
         self._update_status("Ready. Please import a data file.")
+
+    # ── Visual theme ────────────────────────────────────────────────────
+    def _setup_style(self):
+        """Apply a clean ttk theme + a small accent-button style, and set
+        matplotlib defaults, so the app looks modern instead of raw Tk."""
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        ACCENT = "#2f6fb0"
+        ACCENT_ACTIVE = "#245588"
+        SURFACE = "#f4f6f8"
+        try:
+            self.root.configure(bg=SURFACE)
+            style.configure(".", font=("Segoe UI", 10))
+            style.configure("TFrame", background=SURFACE)
+            style.configure("TLabel", background=SURFACE)
+            style.configure("TLabelframe", background=SURFACE, borderwidth=1,
+                            relief="solid")
+            style.configure("TLabelframe.Label", background=SURFACE,
+                            font=("Segoe UI", 10, "bold"), foreground="#333")
+            style.configure("TCheckbutton", background=SURFACE)
+            style.configure("TNotebook", background=SURFACE)
+            style.configure("TNotebook.Tab", padding=(12, 6),
+                            font=("Segoe UI", 10))
+            style.configure("TButton", padding=(8, 4))
+            # Primary/accent buttons for the main actions
+            style.configure("Accent.TButton", foreground="white",
+                            background=ACCENT, padding=(10, 6),
+                            font=("Segoe UI", 10, "bold"))
+            style.map("Accent.TButton",
+                      background=[("active", ACCENT_ACTIVE), ("pressed", ACCENT_ACTIVE)])
+            style.map("TNotebook.Tab",
+                      background=[("selected", SURFACE)])
+        except tk.TclError as e:
+            logging.warning(f"Style setup partial: {e}")
+        # Matplotlib defaults
+        try:
+            plt.rcParams.update({
+                "font.size": 9,
+                "axes.grid": True,
+                "grid.alpha": 0.3,
+                "figure.autolayout": True,
+                "axes.spines.top": False,
+                "axes.spines.right": False,
+            })
+        except Exception:
+            pass
 
     # ── Config ──────────────────────────────────────────────────────────
 
@@ -248,53 +298,60 @@ class RamanProcessorApp:
         ]
         for icon_file, text, cmd in btn_configs:
             icon = self._load_icon(icon_file) if icon_file else None
-            btn = ttk.Button(toolbar, image=icon, text=text, compound=tk.LEFT, command=cmd)
+            style = "Accent.TButton" if text == "Import Data" else "TButton"
+            btn = ttk.Button(toolbar, image=icon, text=text, compound=tk.LEFT,
+                             command=cmd, style=style)
             btn.pack(side=tk.LEFT, padx=2, pady=2)
 
-    def _build_control_sidebar(self, parent) -> ttk.Frame:
-        # Scrollable container so the sidebar doesn't overflow on small screens
-        outer = ttk.Frame(parent, width=310)
-        outer.pack_propagate(False)
-
-        canvas = tk.Canvas(outer, borderwidth=0, highlightthickness=0, width=290)
-        vbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    def _make_scrollable(self, parent) -> ttk.Frame:
+        """Create a vertically-scrollable inner frame inside `parent` and return
+        it. Wheel scrolling is bound only while the cursor is over this canvas."""
+        canvas = tk.Canvas(parent, borderwidth=0, highlightthickness=0)
+        vbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vbar.set)
         vbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
-        panel = ttk.Frame(canvas)
-        panel_id = canvas.create_window((0, 0), window=panel, anchor="nw")
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
 
-        def _on_panel_config(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(inner_id, width=e.width))
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        def _on_canvas_config(event):
-            canvas.itemconfig(panel_id, width=event.width)
-
-        panel.bind("<Configure>", _on_panel_config)
-        canvas.bind("<Configure>", _on_canvas_config)
-
-        # Mouse wheel scrolling — bound only while the cursor is over this
-        # sidebar (via <Enter>/<Leave>) so it doesn't hijack the wheel over the
-        # plot or other Toplevel windows.
         def _on_wheel(event):
             canvas.yview_scroll(int(-event.delta / 120), "units")
 
-        def _bind_wheel(_event):
-            canvas.bind_all("<MouseWheel>", _on_wheel)
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        return inner
 
-        def _unbind_wheel(_event):
-            canvas.unbind_all("<MouseWheel>")
+    def _build_control_sidebar(self, parent) -> ttk.Frame:
+        # A tabbed workflow: Data ▸ Process ▸ Export ▸ Analyze. Each tab is
+        # independently scrollable so no single screen overflows.
+        outer = ttk.Frame(parent, width=330)
+        outer.pack_propagate(False)
 
-        canvas.bind("<Enter>", _bind_wheel)
-        canvas.bind("<Leave>", _unbind_wheel)
+        self.sidebar_nb = ttk.Notebook(outer)
+        self.sidebar_nb.pack(fill="both", expand=True)
 
-        self._build_sidebar_sections(panel)
+        tab_data = ttk.Frame(self.sidebar_nb)
+        tab_process = ttk.Frame(self.sidebar_nb)
+        tab_export = ttk.Frame(self.sidebar_nb)
+        tab_analyze = ttk.Frame(self.sidebar_nb)
+        self.sidebar_nb.add(tab_data, text="Data")
+        self.sidebar_nb.add(tab_process, text="Process")
+        self.sidebar_nb.add(tab_export, text="Export")
+        self.sidebar_nb.add(tab_analyze, text="Analyze")
+
+        self._build_tab_data(self._make_scrollable(tab_data))
+        self._build_tab_process(self._make_scrollable(tab_process))
+        self._build_tab_export(self._make_scrollable(tab_export))
+        self._build_tab_analyze(self._make_scrollable(tab_analyze))
         return outer
 
-    def _build_sidebar_sections(self, panel: ttk.Frame):
+    def _build_tab_data(self, panel: ttk.Frame):
         # 1. Data Load & Select
-        file_frame = ttk.LabelFrame(panel, text="1. Data Load & Select")
+        file_frame = ttk.LabelFrame(panel, text="Data Load & Select")
         file_frame.pack(fill="x", pady=5, padx=2)
         self.info_label = ttk.Label(file_frame, text="No file loaded.", wraplength=250)
         self.info_label.pack(padx=5, pady=5)
@@ -317,7 +374,7 @@ class RamanProcessorApp:
         self.undo_button.pack(fill="x", padx=2)
 
         # 2. Pre-process
-        preproc_frame = ttk.LabelFrame(panel, text="2. Pre-process")
+        preproc_frame = ttk.LabelFrame(panel, text="Pre-process")
         preproc_frame.pack(fill="x", pady=5, padx=2)
         range_frame = ttk.Frame(preproc_frame)
         range_frame.pack(fill="x", pady=5)
@@ -339,8 +396,9 @@ class RamanProcessorApp:
             command=self._open_calibration,
         ).pack(fill="x", pady=4, padx=5)
 
+    def _build_tab_process(self, panel: ttk.Frame):
         # 3. Smooth
-        smoothing_frame = ttk.LabelFrame(panel, text="3. Smooth (Savitzky-Golay)")
+        smoothing_frame = ttk.LabelFrame(panel, text="Smooth (Savitzky-Golay)")
         smoothing_frame.pack(fill="x", pady=5, padx=2)
         ttk.Checkbutton(
             smoothing_frame,
@@ -358,7 +416,7 @@ class RamanProcessorApp:
         ).pack(fill="x", pady=5, padx=5)
 
         # 4. Baseline
-        baseline_frame = ttk.LabelFrame(panel, text="4. Baseline Correction")
+        baseline_frame = ttk.LabelFrame(panel, text="Baseline Correction")
         baseline_frame.pack(fill="x", pady=5, padx=2)
         ttk.Button(
             baseline_frame, text="Adjust Baseline...", command=self._open_baseline_corrector
@@ -372,7 +430,7 @@ class RamanProcessorApp:
         self.baseline_algo_label.pack(fill="x", padx=5, pady=(0, 5))
 
         # 5. Normalization
-        norm_frame = ttk.LabelFrame(panel, text="5. Normalization")
+        norm_frame = ttk.LabelFrame(panel, text="Normalization")
         norm_frame.pack(fill="x", pady=5, padx=2)
         combo = ttk.Combobox(
             norm_frame,
@@ -387,7 +445,7 @@ class RamanProcessorApp:
         ).pack(fill="x", padx=5, pady=(0, 5))
 
         # 5b. Derivative (applied after baseline, before normalization)
-        deriv_frame = ttk.LabelFrame(panel, text="5b. Derivative (optional)")
+        deriv_frame = ttk.LabelFrame(panel, text="Derivative (optional)")
         deriv_frame.pack(fill="x", pady=5, padx=2)
         ttk.Checkbutton(
             deriv_frame,
@@ -404,14 +462,15 @@ class RamanProcessorApp:
         ttk.Entry(drow, textvariable=self.deriv_polyorder, width=4).pack(side="left", padx=2)
 
         # 5c. Peak analysis
-        peak_frame = ttk.LabelFrame(panel, text="5c. Peak Analysis")
+        peak_frame = ttk.LabelFrame(panel, text="Peak Analysis")
         peak_frame.pack(fill="x", pady=5, padx=2)
         ttk.Button(
             peak_frame, text="Detect & Fit Peaks...", command=self._open_peak_analysis
         ).pack(fill="x", padx=5, pady=5)
 
+    def _build_tab_export(self, panel: ttk.Frame):
         # 6. Export
-        export_frame = ttk.LabelFrame(panel, text="6. Export")
+        export_frame = ttk.LabelFrame(panel, text="Export")
         export_frame.pack(fill="x", pady=5, padx=2)
         ttk.Button(
             export_frame, text="Export Smoothed Data...", command=self._export_smoothed_data
@@ -424,8 +483,9 @@ class RamanProcessorApp:
             command=self._export_all_stages,
         ).pack(fill="x", pady=2, padx=5)
 
+    def _build_tab_analyze(self, panel: ttk.Frame):
         # 7. Batch
-        batch_frame = ttk.LabelFrame(panel, text="7. Batch & Multi-spectrum Analysis")
+        batch_frame = ttk.LabelFrame(panel, text="Batch Processing")
         batch_frame.pack(fill="x", pady=5, padx=2)
         ttk.Checkbutton(
             batch_frame,
@@ -437,12 +497,18 @@ class RamanProcessorApp:
         ttk.Label(njobs_row, text="n_jobs (-1 = all cores):").pack(side="left")
         ttk.Entry(njobs_row, textvariable=self.batch_n_jobs, width=5).pack(side="right")
         ttk.Button(
-            batch_frame, text="Run Batch Process...", command=self._start_batch_process
+            batch_frame, text="Run Batch Process...", command=self._start_batch_process,
+            style="Accent.TButton",
         ).pack(fill="x", pady=5, padx=5)
+        ttk.Label(batch_frame,
+                  text="Run a batch first to enable the analyses below.",
+                  foreground="gray", wraplength=280).pack(anchor="w", padx=5, pady=(0, 4))
 
-        ttk.Separator(batch_frame, orient="horizontal").pack(fill="x", pady=5)
+        # Multivariate analysis
+        mv_frame = ttk.LabelFrame(panel, text="Multivariate Analysis")
+        mv_frame.pack(fill="x", pady=5, padx=2)
 
-        pca_scaling_row = ttk.Frame(batch_frame)
+        pca_scaling_row = ttk.Frame(mv_frame)
         pca_scaling_row.pack(fill="x", pady=2, padx=5)
         ttk.Label(pca_scaling_row, text="PCA Scaling:").pack(side="left")
         pca_combo = ttk.Combobox(
@@ -455,19 +521,19 @@ class RamanProcessorApp:
         pca_combo.pack(side="right")
         pca_combo.bind("<<ComboboxSelected>>", self._on_pca_scaling_change)
 
-        pca_frame = ttk.Frame(batch_frame)
+        pca_frame = ttk.Frame(mv_frame)
         pca_frame.pack(fill="x", pady=2, padx=5)
         ttk.Button(pca_frame, text="Run PCA", command=self._run_pca_analysis).pack(side="left")
         ttk.Label(pca_frame, text="Conf:").pack(side="right")
         ttk.Entry(pca_frame, textvariable=self.pca_confidence, width=6).pack(side="right", padx=2)
 
-        nmf_frame = ttk.Frame(batch_frame)
+        nmf_frame = ttk.Frame(mv_frame)
         nmf_frame.pack(fill="x", pady=2, padx=5)
         ttk.Button(nmf_frame, text="Run NMF", command=self._run_nmf_analysis).pack(side="left")
         ttk.Entry(nmf_frame, textvariable=self.nmf_n_components, width=5).pack(side="right")
         ttk.Label(nmf_frame, text="Components:").pack(side="right")
 
-        nmf_init_row = ttk.Frame(batch_frame)
+        nmf_init_row = ttk.Frame(mv_frame)
         nmf_init_row.pack(fill="x", pady=2, padx=5)
         ttk.Label(nmf_init_row, text="NMF Init:").pack(side="left")
         nmf_combo = ttk.Combobox(
@@ -480,16 +546,24 @@ class RamanProcessorApp:
         nmf_combo.pack(side="right")
         nmf_combo.bind("<<ComboboxSelected>>", self._on_nmf_init_change)
 
-        rs_row = ttk.Frame(batch_frame)
+        rs_row = ttk.Frame(mv_frame)
         rs_row.pack(fill="x", padx=5, pady=(2, 5))
         ttk.Label(rs_row, text="NMF Random State:").pack(side="left")
         ttk.Entry(rs_row, textvariable=self.nmf_random_state, width=6).pack(side="right")
 
-        ttk.Separator(batch_frame, orient="horizontal").pack(fill="x", pady=5)
-        ttk.Button(batch_frame, text="Clustering (HCA / K-means / UMAP)...",
+        ttk.Separator(mv_frame, orient="horizontal").pack(fill="x", pady=5)
+        ttk.Button(mv_frame, text="Clustering (HCA / K-means / UMAP)...",
                    command=self._run_clustering).pack(fill="x", pady=2, padx=5)
-        ttk.Button(batch_frame, text="Run MCR-ALS...",
-                   command=self._run_mcr_als).pack(fill="x", pady=2, padx=5)
+        ttk.Button(mv_frame, text="Run MCR-ALS...",
+                   command=self._run_mcr_als).pack(fill="x", pady=(2, 5), padx=5)
+
+        # Specialized modules
+        spec_frame = ttk.LabelFrame(panel, text="Specialized")
+        spec_frame.pack(fill="x", pady=5, padx=2)
+        ttk.Button(spec_frame, text="Microalgae Band Analysis...",
+                   command=self._open_microalgae).pack(fill="x", pady=2, padx=5)
+        ttk.Button(spec_frame, text="Hyperspectral Mapping...",
+                   command=self._open_mapping).pack(fill="x", pady=(2, 5), padx=5)
 
     def _build_plot_panel(self, parent) -> ttk.Frame:
         panel = ttk.Frame(parent)

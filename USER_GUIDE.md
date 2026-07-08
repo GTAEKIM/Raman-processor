@@ -62,25 +62,32 @@ python cli.py --help
 
 ## 2. 메인 화면 구성
 
+좌측 컨트롤 패널은 **워크플로우 탭**(Data ▸ Process ▸ Export ▸ Analyze)으로 구성되어
+각 단계가 깔끔하게 분리됩니다. 전체는 clam 테마로 스타일링됩니다.
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  [Import Data] [Import Parameters] [Hyperspectral Mapping]  │
-├──────────────────┬──────────────────────────────────────────┤
-│ 좌측 컨트롤 패널 │                                          │
-│  1. Data Load    │                                          │
-│  2. Pre-process  │         중앙: 스펙트럼 플롯              │
-│  3. Smoothing    │         (Matplotlib, 확대/팬 가능)       │
-│  4. Baseline     │                                          │
-│  5. Normalize    │                                          │
-│  6. Export       │──────────────────────────────────────────│
-│  7. Batch / PCA  │ [Raw] [Smooth] [Baseline] [Final] 체크   │
-└──────────────────┴──────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│ [Import Data] [Import Parameters] [Mapping] [Microalgae]      │  ← 툴바
+├──────────────────────┬────────────────────────────────────────┤
+│ [Data][Process]      │                                        │
+│ [Export][Analyze]    │        중앙: 스펙트럼 플롯             │
+│  ─ 선택된 탭 내용 ─  │        (Matplotlib, 확대/팬 가능)      │
+│                      │                                        │
+│                      │────────────────────────────────────────│
+│                      │ [Raw] [Smooth] [Baseline] [Final] 체크 │
+└──────────────────────┴────────────────────────────────────────┘
 ```
 
-- **툴바**: 파일 불러오기, 파라미터 불러오기/저장, 하이퍼스펙트럴 매핑 창 열기.
-- **좌측 패널**: 파이프라인 단계별 파라미터 입력.
+### 탭 구성
+- **Data**: 데이터 불러오기/선택/삭제/Undo, Raman shift 범위, 코스믹 레이, 파장 보정.
+- **Process**: Smoothing(SG), Baseline, Normalization, Derivative, Peak Analysis.
+- **Export**: Smoothed / Final / All-Stages 내보내기.
+- **Analyze**: Batch 처리 → Multivariate(PCA/NMF/Clustering/MCR-ALS) → Specialized(미세조류/매핑).
+
+- **툴바**: Import Data(강조 버튼), Import Parameters, Hyperspectral Mapping, Microalgae Analysis.
 - **중앙 플롯**: 현재 선택된 샘플의 스펙트럼을 단계별로 겹쳐서 표시.
 - **하단 체크박스**: 어떤 곡선을 보일지 선택 (Raw / Smoothed / Baseline / Final).
+- 각 탭은 독립적으로 스크롤되며, 마우스 휠은 커서가 올라간 패널에만 작동합니다.
 
 ---
 
