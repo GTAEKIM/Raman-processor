@@ -1840,6 +1840,208 @@ def microalgae_report(
     return intensity_df, ratio_df
 
 
+# ───────────────────────── Supervised / ML analysis ─────────────────────────
+
+
+def ml_matrix(processed_df: pd.DataFrame) -> Tuple[np.ndarray, List[str], np.ndarray]:
+    """From a batch processed_df (col 0 = shift, rest = samples) return
+    (X samples×features, sample_names, raman_shifts)."""
+    x = processed_df.iloc[:, 0].values.astype(float)
+    names = list(processed_df.columns[1:])
+    X = processed_df.iloc[:, 1:].values.T.astype(float)
+    return X, names, x
+
+
+def _pls_vip(pls, n_features: int) -> np.ndarray:
+    """Variable Importance in Projection for a fitted PLS model."""
+    t = pls.x_scores_            # n × A
+    w = pls.x_weights_          # p × A
+    q = pls.y_loadings_         # m × A
+    A = w.shape[1]
+    ss = np.array([float((q[:, a] ** 2).sum() * (t[:, a] ** 2).sum()) for a in range(A)])
+    total = ss.sum()
+    if total <= 0:
+        return np.zeros(n_features)
+    wnorm = w / (np.linalg.norm(w, axis=0, keepdims=True) + 1e-12)
+    vip = np.sqrt(n_features * (wnorm ** 2 @ ss) / total)
+    return vip
+
+
+def perform_plsda(
+    X: np.ndarray, y_labels, n_components: int = 2, cv_folds: int = 5,
+    random_state: int = 0,
+) -> Dict[str, Any]:
+    """PLS Discriminant Analysis. Returns scores, predicted labels, VIP,
+    confusion matrix, train & cross-validated accuracy."""
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.metrics import confusion_matrix, accuracy_score
+
+    y = np.asarray(y_labels)
+    classes = np.unique(y)
+    if len(classes) < 2:
+        raise ValueError("PLS-DA requires at least 2 classes.")
+    if X.shape[0] < 3:
+        raise ValueError("PLS-DA requires at least 3 samples.")
+
+    def _onehot(yv):
+        Y = np.zeros((len(yv), len(classes)))
+        for i, c in enumerate(classes):
+            Y[yv == c, i] = 1
+        return Y
+
+    nc = max(1, min(n_components, X.shape[0] - 1, X.shape[1]))
+    pls = PLSRegression(n_components=nc)
+    pls.fit(X, _onehot(y))
+    pred = classes[np.argmax(pls.predict(X), axis=1)]
+    train_acc = accuracy_score(y, pred)
+    vip = _pls_vip(pls, X.shape[1])
+    cm = confusion_matrix(y, pred, labels=classes)
+
+    counts = np.array([int(np.sum(y == c)) for c in classes])
+    k = int(min(cv_folds, counts.min()))
+    if k >= 2:
+        skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+        correct = total = 0
+        for tr, te in skf.split(X, y):
+            nctr = max(1, min(nc, len(tr) - 1, X.shape[1]))
+            m = PLSRegression(n_components=nctr).fit(X[tr], _onehot(y[tr]))
+            p = classes[np.argmax(m.predict(X[te]), axis=1)]
+            correct += int(np.sum(p == y[te])); total += len(te)
+        cv_acc = correct / total if total else float('nan')
+    else:
+        cv_acc = float('nan')
+
+    return {
+        "method": "PLS-DA", "classes": classes, "scores": pls.x_scores_,
+        "predicted": pred, "vip": vip, "confusion": cm,
+        "train_accuracy": float(train_acc), "cv_accuracy": float(cv_acc),
+        "n_components": nc, "cv_folds": k,
+    }
+
+
+def perform_plsr(
+    X: np.ndarray, y_values, n_components: int = 2, cv_folds: int = 5,
+    random_state: int = 0,
+) -> Dict[str, Any]:
+    """PLS regression for continuous targets. Returns predictions, R²/RMSE
+    (train + CV), coefficients, and VIP."""
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.model_selection import cross_val_predict, KFold
+    from sklearn.metrics import r2_score, mean_squared_error
+
+    y = np.asarray(y_values, dtype=float)
+    if X.shape[0] < 3:
+        raise ValueError("PLS regression requires at least 3 samples.")
+    nc = max(1, min(n_components, X.shape[0] - 1, X.shape[1]))
+    pls = PLSRegression(n_components=nc).fit(X, y)
+    yhat = pls.predict(X).ravel()
+
+    k = int(min(cv_folds, X.shape[0]))
+    if k >= 2:
+        ycv = cross_val_predict(
+            PLSRegression(n_components=nc), X, y,
+            cv=KFold(n_splits=k, shuffle=True, random_state=random_state),
+        ).ravel()
+        r2_cv = float(r2_score(y, ycv))
+        rmsecv = float(np.sqrt(mean_squared_error(y, ycv)))
+    else:
+        ycv = None; r2_cv = float('nan'); rmsecv = float('nan')
+
+    return {
+        "method": "PLSR", "y": y, "pred_train": yhat, "pred_cv": ycv,
+        "r2_train": float(r2_score(y, yhat)), "r2_cv": r2_cv, "rmsecv": rmsecv,
+        "coef": np.asarray(pls.coef_).ravel(), "vip": _pls_vip(pls, X.shape[1]),
+        "n_components": nc, "cv_folds": k,
+    }
+
+
+def perform_classifier(
+    X: np.ndarray, y_labels, model: str = 'rf', cv_folds: int = 5,
+    random_state: int = 0,
+) -> Dict[str, Any]:
+    """Random Forest / SVM / kNN classifier with stratified CV. Returns CV
+    accuracy, confusion matrix, and feature importance (RF)."""
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.svm import SVC
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.model_selection import cross_val_predict, StratifiedKFold
+    from sklearn.metrics import confusion_matrix, accuracy_score
+
+    y = np.asarray(y_labels)
+    classes = np.unique(y)
+    if len(classes) < 2:
+        raise ValueError("Classification requires at least 2 classes.")
+
+    if model == 'rf':
+        clf = RandomForestClassifier(n_estimators=300, random_state=random_state)
+    elif model == 'svm':
+        clf = SVC(kernel='rbf', random_state=random_state)
+    elif model == 'knn':
+        clf = KNeighborsClassifier(n_neighbors=max(1, min(5, len(y) - 1)))
+    else:
+        raise ValueError(f"Unknown model: {model}")
+
+    counts = np.array([int(np.sum(y == c)) for c in classes])
+    k = int(min(cv_folds, counts.min()))
+    if k >= 2:
+        pred = cross_val_predict(
+            clf, X, y, cv=StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state))
+        cv_acc = float(accuracy_score(y, pred))
+        cm = confusion_matrix(y, pred, labels=classes)
+    else:
+        pred = None; cv_acc = float('nan'); cm = None
+
+    clf.fit(X, y)
+    importance = getattr(clf, 'feature_importances_', None)
+    return {
+        "method": model.upper(), "classes": classes, "cv_pred": pred,
+        "cv_accuracy": cv_acc, "confusion": cm,
+        "importance": None if importance is None else np.asarray(importance),
+        "cv_folds": k,
+    }
+
+
+def perform_tsne(X: np.ndarray, perplexity: float = 30.0,
+                 random_state: int = 0) -> Dict[str, Any]:
+    """2-D t-SNE embedding (unsupervised). Perplexity is clamped to the sample count."""
+    from sklearn.manifold import TSNE
+    n = X.shape[0]
+    if n < 3:
+        raise ValueError("t-SNE requires at least 3 samples.")
+    perp = float(max(2.0, min(perplexity, (n - 1) / 3.0)))
+    emb = TSNE(n_components=2, perplexity=perp, random_state=random_state,
+               init='pca', learning_rate='auto').fit_transform(X)
+    return {"embedding": emb, "perplexity": perp}
+
+
+def spectral_match(query: np.ndarray, library: Dict[str, np.ndarray],
+                   metric: str = 'cosine') -> List[Tuple[str, float]]:
+    """Rank library spectra by similarity to `query`.
+
+    metric: 'cosine' (dot/norms) | 'sam' (spectral angle mapper similarity).
+    library: {name: spectrum} with the same length as query.
+    Returns [(name, score), ...] sorted high→low.
+    """
+    q = np.asarray(query, dtype=float)
+    qn = np.linalg.norm(q) + 1e-12
+    out: List[Tuple[str, float]] = []
+    for name, spec in library.items():
+        s = np.asarray(spec, dtype=float)
+        if s.shape != q.shape:
+            continue
+        cos = float(np.dot(q, s) / (qn * (np.linalg.norm(s) + 1e-12)))
+        if metric == 'cosine':
+            sim = cos
+        elif metric == 'sam':
+            sim = float(1.0 - np.arccos(np.clip(cos, -1.0, 1.0)) / np.pi)
+        else:
+            raise ValueError(f"Unknown match metric: {metric}")
+        out.append((name, sim))
+    out.sort(key=lambda t: t[1], reverse=True)
+    return out
+
+
 # ───────────────────────── Plugin Registry ─────────────────────────
 
 

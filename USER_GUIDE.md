@@ -407,6 +407,37 @@ Raman 밴드 세기를 측정하고 조성 비율(불포화도, PUFA index, Lipi
 
 ---
 
+## 12-C. ML / Chemometrics 분석 (ML Analysis)
+
+Analyze 탭 **[ML / Chemometrics...]** 또는 Specialized 그룹에서 엽니다.
+기존 비지도(PCA/NMF/Clustering/MCR) 위에 **지도학습 + 추가 비지도** 기법을 제공합니다.
+
+### 지원 모델
+| 모델 | 유형 | 라벨 |
+|---|---|---|
+| **PLS-DA** | 분류 (chemometrics 표준) | 범주형 |
+| **PLS regression** | 정량 (예: 지질%, 농도) | 숫자 |
+| **Random Forest / SVM / kNN** | 분류 + 교차검증 | 범주형 |
+| **t-SNE** | 2D 임베딩 (비지도) | 불필요 (있으면 색상) |
+| **Spectral matching** | cosine / SAM 유사도 순위 | 불필요 |
+
+### 라벨/타깃 지정
+- 좌측 **Labels/targets** 표에서 샘플 행을 **더블클릭**하여 라벨(분류) 또는 숫자(회귀)를 입력.
+- **[Import labels CSV...]**: `sample,label` 2열 CSV로 일괄 지정.
+- 라벨이 있는 샘플만 지도학습에 사용됩니다.
+
+### 실행 & 결과
+- 파라미터(PLS 성분 수, CV folds, t-SNE perplexity, 매칭 metric) 설정 후 **[Run]**.
+- **Metrics** 탭: 정확도 / R² / RMSECV / 혼동행렬(텍스트).
+- **Plot** 탭: PLS-DA·t-SNE 스코어 산점도(라벨별 색), 회귀는 예측 vs 실제, 분류는 혼동행렬 히트맵, 매칭은 상위 유사도 막대.
+- **Importance / VIP** 탭: PLS는 VIP, RF는 feature importance를 Raman shift 축 위에 표시.
+- **[Export results to Excel...]**: 스코어/예측/VIP/importance/혼동행렬/지표 시트.
+
+> **데이터 소스**: 배치 결과가 있으면 사용, 없으면 현재 파이프라인으로 전체 스펙트럼을 즉석 처리.
+> 최소 3개 스펙트럼 필요. 지도학습은 클래스당 표본 수에 따라 CV folds가 자동 축소됩니다.
+
+---
+
 ## 13. 플러그인 작성
 
 `plugins/baseline/` 디렉터리에 `.py` 파일을 넣기만 하면 앱 시작 시 자동 등록됩니다.

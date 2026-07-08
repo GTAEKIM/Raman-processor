@@ -25,6 +25,7 @@ from mcr_als_window import MCRALSWindow
 from calibration_window import CalibrationWindow
 from mapping_window import MappingWindow
 from microalgae_window import MicroalgaeWindow
+from ml_analysis_window import MLAnalysisWindow
 
 logging.basicConfig(
     filename='app.log',
@@ -49,7 +50,7 @@ class CustomToolbar(NavigationToolbar2Tk):
 class RamanProcessorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Raman Spectroscopy Processor v2.5")
+        self.root.title("Raman Spectroscopy Processor v2.6")
         self.root.geometry("1280x820")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -560,6 +561,8 @@ class RamanProcessorApp:
         # Specialized modules
         spec_frame = ttk.LabelFrame(panel, text="Specialized")
         spec_frame.pack(fill="x", pady=5, padx=2)
+        ttk.Button(spec_frame, text="ML / Chemometrics (PLS-DA/PLSR/RF/t-SNE)...",
+                   command=self._open_ml).pack(fill="x", pady=2, padx=5)
         ttk.Button(spec_frame, text="Microalgae Band Analysis...",
                    command=self._open_microalgae).pack(fill="x", pady=2, padx=5)
         ttk.Button(spec_frame, text="Hyperspectral Mapping...",
@@ -1704,6 +1707,21 @@ class RamanProcessorApp:
             self.root, df, self.config,
             config_path=getattr(self, "_config_path", None),
         )
+
+    def _open_ml(self):
+        df = self._build_processed_df()
+        if df is None:
+            messagebox.showwarning(
+                "ML Analysis",
+                "Import data first (optionally run a batch). The spectra will be "
+                "processed with the current pipeline settings.",
+            )
+            return
+        if df.shape[1] - 1 < 3:
+            messagebox.showwarning(
+                "ML Analysis", "Need at least 3 spectra for ML analysis.")
+            return
+        MLAnalysisWindow(self.root, df)
 
     def _ingest_cube_dataframe(self, cube_df):
         """Receive a pixel-as-sample DataFrame from the mapping window."""
